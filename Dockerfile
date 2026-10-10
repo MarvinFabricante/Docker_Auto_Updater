@@ -16,10 +16,12 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-# Copy automation script
+# Copy automation script and internal modules
 COPY container.sh /usr/local/bin/container-updater
-RUN chmod +x /usr/local/bin/container-updater && \
-    ln -s /usr/local/bin/container-updater /app/container.sh
+COPY src/ /usr/local/bin/src/
+RUN chmod +x /usr/local/bin/container-updater /usr/local/bin/src/*.sh && \
+    ln -s /usr/local/bin/container-updater /app/container.sh && \
+    ln -s /usr/local/bin/src /app/src
 
 # Environment defaults
 ENV CONTAINER_NAME="" \

@@ -112,9 +112,23 @@ You can set these in a `.env` file or pass them as options:
 - `bash` (4.0+)
 - `python3`
 
-Make sure the script is executable:
+Make sure the scripts are executable:
 ```bash
-chmod +x container.sh
+chmod +x container.sh src/*.sh
+```
+
+---
+
+## Project Structure
+
+```text
+├── container.sh          # Main entry point (parses CLI arguments & routes commands)
+├── .env                  # Environment configurations (.env.example template)
+└── src/                  # Internal logic modules
+    ├── core_engine.sh    # Pure Docker operations (pull, run, rollback, prune, healthcheck)
+    ├── tui.sh            # UI rendering, animations, menu loops, and layout
+    ├── server.sh         # Webhook server logic, port listening, and token validation
+    └── utils.sh          # Helper functions (logging, color definitions, notifications, config)
 ```
 
 ---
