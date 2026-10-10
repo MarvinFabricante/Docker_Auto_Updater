@@ -204,7 +204,7 @@ get_menu_choice() {
             exit 0
         fi
 
-        if [[ "$key" =~ ^[0-6qQ]$ ]]; then
+        if [[ "$key" =~ ^[0-8qQ]$ ]]; then
             printf "%s\n" "$key"
             out_key="$key"
             stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
@@ -492,11 +492,13 @@ render_fullscreen_dashboard() {
     echo -e "    ${C_GREEN}[1]${C_RESET}    ${C_BOLD}Update Container${C_RESET}     ${C_DIM}Deploy new image with safety health checks${C_RESET}"
     echo -e "    ${C_CYAN}[2]${C_RESET}    ${C_BOLD}Inspect Status${C_RESET}       ${C_DIM}View deep health, IP, ports & rollback status${C_RESET}"
     echo -e "    ${C_YELLOW}[3]${C_RESET}    ${C_BOLD}Quick Rollback${C_RESET}       ${C_DIM}Immediately restore last known backup${C_RESET}"
-    echo -e "    ${C_MAGENTA}[4]${C_RESET}    ${C_BOLD}Prune Cache${C_RESET}          ${C_DIM}Reclaim space from dangling images & build cache${C_RESET}"
+    echo -e "    ${C_YELLOW}[4]${C_RESET}    ${C_BOLD}Stop Container${C_RESET}       ${C_DIM}Turn off / safely stop running container${C_RESET}"
+    echo -e "    ${C_RED}[5]${C_RESET}    ${C_BOLD}Remove Container${C_RESET}     ${C_DIM}Safely delete container from system${C_RESET}"
+    echo -e "    ${C_MAGENTA}[6]${C_RESET}    ${C_BOLD}Prune Cache${C_RESET}          ${C_DIM}Reclaim space from dangling images & build cache${C_RESET}"
     echo ""
     echo -e "  ${C_BOLD}${C_CYAN}DAEMONS & AUTOMATION${C_RESET}"
-    echo -e "    ${C_BLUE}[5]${C_RESET}     ${C_BOLD}Watch Registry${C_RESET}       ${C_DIM}Continuously monitor registry & auto-deploy${C_RESET}"
-    echo -e "    ${C_BLUE}[6]${C_RESET}    ${C_BOLD}Webhook Listener${C_RESET}     ${C_DIM}Run HTTP listener for CI/CD deployments${C_RESET}"
+    echo -e "    ${C_BLUE}[7]${C_RESET}     ${C_BOLD}Watch Registry${C_RESET}       ${C_DIM}Continuously monitor registry & auto-deploy${C_RESET}"
+    echo -e "    ${C_BLUE}[8]${C_RESET}    ${C_BOLD}Webhook Listener${C_RESET}     ${C_DIM}Run HTTP listener for CI/CD deployments${C_RESET}"
     echo ""
     echo -e "    ${C_DIM}[0]  Exit Application (or 'q')${C_RESET}"
     echo ""
@@ -532,7 +534,7 @@ interactive_menu() {
         render_fullscreen_dashboard
 
         local menu_choice=""
-        printf "  › Select option [0-6] or [q] to exit: "
+        printf "  › Select option [0-8] or [q] to exit: "
         if ! get_menu_choice menu_choice; then
             exit_fullscreen
             echo ""
@@ -569,11 +571,27 @@ interactive_menu() {
                 ;;
             4)
                 clear_screen
+                CONTAINER_NAME=""
+                if prompt_container_selection; then
+                    do_stop || true
+                    pause_and_return
+                fi
+                ;;
+            5)
+                clear_screen
+                CONTAINER_NAME=""
+                if prompt_container_selection; then
+                    do_remove || true
+                    pause_and_return
+                fi
+                ;;
+            6)
+                clear_screen
                 echo ""
                 do_prune || true
                 pause_and_return
                 ;;
-            5)
+            7)
                 clear_screen
                 CONTAINER_NAME=""
                 if prompt_container_selection; then
@@ -581,7 +599,7 @@ interactive_menu() {
                     pause_and_return
                 fi
                 ;;
-            6)
+            8)
                 clear_screen
                 do_webhook_interactive || true
                 pause_and_return
@@ -594,7 +612,7 @@ interactive_menu() {
                 exit 0
                 ;;
             *)
-                echo -e "  ${I_ERR} Invalid option. Please select 0-6 or 'q'."
+                echo -e "  ${I_ERR} Invalid option. Please select 0-8 or 'q'."
                 sleep 1
                 ;;
         esac

@@ -35,13 +35,28 @@ Launches an immersive, full-screen terminal application (TUI) with a live contai
 ./container.sh status -c my-app
 ```
 
-### 4. Roll Back Manually
+### 4. Turn Off a Container (Stop Gracefully)
+Safely shuts down a running container respecting timeouts:
+```bash
+./container.sh stop -c my-app
+```
+
+### 5. Remove a Container
+Deletes a container (safely stops it first if running, with confirmation prompt in interactive mode):
+```bash
+./container.sh remove -c my-app
+
+# Or bypass prompt in automated scripts:
+./container.sh remove -c my-app --force
+```
+
+### 6. Roll Back Manually
 If you ever want to undo the last update:
 ```bash
 ./container.sh rollback -c my-app
 ```
 
-### 5. Clean Up Old Cache
+### 7. Clean Up Old Cache
 Removes unused images and build cache to save disk space:
 ```bash
 ./container.sh prune

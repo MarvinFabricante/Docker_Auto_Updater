@@ -38,6 +38,7 @@ HEALTH_URL="${HEALTH_URL:-}"
 HEALTH_CMD="${HEALTH_CMD:-}"
 AUTO_PRUNE="${AUTO_PRUNE:-true}"
 FORCE_UPDATE="${FORCE_UPDATE:-false}"
+FORCE="${FORCE:-false}"
 BACKUP_SUFFIX="${BACKUP_SUFFIX:-_rollback}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-60}"
 WEBHOOK_PORT="${WEBHOOK_PORT:-9000}"
@@ -78,7 +79,7 @@ main() {
     fi
 
     local command="update"
-    if [ $# -gt 0 ] && [[ "$1" =~ ^(update|rollback|watch|webhook|status|prune|help|-h|--help)$ ]]; then
+    if [ $# -gt 0 ] && [[ "$1" =~ ^(update|rollback|watch|webhook|status|prune|stop|remove|rm|delete|help|-h|--help)$ ]]; then
         command="$1"
         shift
     fi
@@ -117,8 +118,9 @@ main() {
                 AUTO_PRUNE="false"
                 shift
                 ;;
-            --force)
+            -f|--force)
                 FORCE_UPDATE="true"
+                FORCE="true"
                 shift
                 ;;
             --skip-pull)
@@ -186,6 +188,12 @@ main() {
             ;;
         rollback)
             do_manual_rollback
+            ;;
+        stop)
+            do_stop
+            ;;
+        remove|rm|delete)
+            do_remove
             ;;
         watch)
             do_watch

@@ -116,6 +116,27 @@ echo "5. Testing cache cleanup..."
 "${UPDATER}" prune
 echo "✔ Test 3 passed: cache cleanup works."
 
+# 6. Test Stopping Container (Turn off)
+echo ""
+echo "6. Testing stopping container (turn off)..."
+"${UPDATER}" stop --container "${TEST_CONTAINER}" --stop-timeout 5
+IS_RUNNING=$(docker inspect --format '{{.State.Running}}' "${TEST_CONTAINER}" 2>/dev/null || echo "false")
+if [ "${IS_RUNNING}" = "true" ]; then
+    echo "✖ Stop container test failed: container is still running!"
+    exit 1
+fi
+echo "✔ Test 4 passed: container turned off / stopped successfully."
+
+# 7. Test Removing Container
+echo ""
+echo "7. Testing removing container..."
+"${UPDATER}" remove --container "${TEST_CONTAINER}" --force
+if docker inspect "${TEST_CONTAINER}" >/dev/null 2>&1; then
+    echo "✖ Remove container test failed: container still exists!"
+    exit 1
+fi
+echo "✔ Test 5 passed: container removed successfully."
+
 echo ""
 echo "──────────────────────────────────────────"
 echo "✔ All tests passed successfully!"

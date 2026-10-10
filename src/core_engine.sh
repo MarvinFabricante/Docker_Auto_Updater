@@ -103,6 +103,8 @@ print(json.dumps(args))
 stop_container_gracefully() {
     local target="$1"
     local timeout="${2:-15}"
+    local label="${3:-Stopping old container safely (giving up to ${timeout}s)}"
+    local success_label="${4:-Old container stopped.}"
 
     if ! docker inspect "$target" >/dev/null 2>&1; then
         return 0
@@ -111,13 +113,17 @@ stop_container_gracefully() {
     local is_running
     is_running=$(docker inspect --format '{{.State.Running}}' "$target" 2>/dev/null || echo "false")
     if [ "$is_running" = "true" ]; then
+        if [ "${DRY_RUN:-false}" = "true" ]; then
+            log_info "[dry-run] Would stop container '${target}' safely (timeout: ${timeout}s)."
+            return 0
+        fi
         if is_interactive_tty; then
-            run_with_spinner "Stopping old container safely (giving up to ${timeout}s)" docker stop -t "$timeout" "$target"
-            log_info "Old container stopped."
+            run_with_spinner "$label" docker stop -t "$timeout" "$target"
+            log_info "$success_label"
         else
-            log_info "Stopping old container safely (giving it up to ${timeout}s)..."
+            log_info "${label}..."
             docker stop -t "$timeout" "$target" >/dev/null
-            log_info "Old container stopped."
+            log_info "$success_label"
         fi
     fi
 }
@@ -559,3 +565,116 @@ do_prune() {
     check_dependencies
     clean_dangling_caches
 }
+
+# Safely turn off / stop a container
+do_stop() {
+    check_dependencies
+    prompt_container_selection || return 1
+
+    if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        log_error "Container '${CONTAINER_NAME}' does not exist."
+        return 1
+    fi
+
+    local is_running
+    is_running=$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || echo "false")
+
+    if [ "$is_running" != "true" ]; then
+        log_warn "Container '${CONTAINER_NAME}' is already stopped (turned off)."
+        return 0
+    fi
+
+    if [ "${DRY_RUN:-false}" = "true" ]; then
+        log_info "[dry-run] Would stop container '${CONTAINER_NAME}' safely (timeout: ${STOP_TIMEOUT}s)."
+        return 0
+    fi
+
+    log_info "Turning off container '${CONTAINER_NAME}' safely (timeout: ${STOP_TIMEOUT}s)..."
+    stop_container_gracefully "${CONTAINER_NAME}" "${STOP_TIMEOUT}" "Stopping container '${CONTAINER_NAME}'" "Container '${CONTAINER_NAME}' stopped."
+
+    is_running=$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || echo "false")
+    if [ "$is_running" = "true" ]; then
+        log_error "Failed to turn off container '${CONTAINER_NAME}'."
+        return 1
+    fi
+
+    log_success "Container '${CONTAINER_NAME}' turned off successfully."
+}
+
+# Safely remove a container
+do_remove() {
+    check_dependencies
+    prompt_container_selection || return 1
+
+    if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        log_error "Container '${CONTAINER_NAME}' does not exist."
+        return 1
+    fi
+
+    local is_running
+    is_running=$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || echo "false")
+
+    # In interactive mode, ask for confirmation to prevent accidental deletion unless forced
+    if ([ "${INTERACTIVE_MODE:-false}" = "true" ] || [ -t 0 ]) && [ "${FORCE:-false}" != "true" ] && [ "${FORCE_UPDATE:-false}" != "true" ]; then
+        local confirm=""
+        if [ "$is_running" = "true" ]; then
+            echo ""
+            echo -e "  ${C_YELLOW}⚠  Warning: Container '${CONTAINER_NAME}' is currently running!${C_RESET}"
+            safe_read_line "  › Stop and remove container '${CONTAINER_NAME}'? [y/N]: " "n" confirm
+        else
+            echo ""
+            safe_read_line "  › Are you sure you want to remove container '${CONTAINER_NAME}'? [y/N]: " "n" confirm
+        fi
+        if [[ ! "$confirm" =~ ^[Yy] ]]; then
+            log_warn "Removal of container '${CONTAINER_NAME}' cancelled."
+            return 1
+        fi
+    fi
+
+    if [ "${DRY_RUN:-false}" = "true" ]; then
+        log_info "[dry-run] Would stop (if running) and remove container '${CONTAINER_NAME}'."
+        return 0
+    fi
+
+    # If running, stop container safely first
+    if [ "$is_running" = "true" ]; then
+        log_info "Stopping container '${CONTAINER_NAME}' safely before removal..."
+        stop_container_gracefully "${CONTAINER_NAME}" "${STOP_TIMEOUT}" "Stopping container '${CONTAINER_NAME}'" "Container stopped."
+    fi
+
+    # Remove the container
+    if is_interactive_tty; then
+        run_with_spinner "Removing container '${CONTAINER_NAME}'" docker rm -f "${CONTAINER_NAME}"
+    else
+        log_info "Removing container '${CONTAINER_NAME}'..."
+        docker rm -f "${CONTAINER_NAME}" >/dev/null
+    fi
+
+    # Check for optional rollback backup container
+    local backup_target="${CONTAINER_NAME}${BACKUP_SUFFIX}"
+    if docker inspect "${backup_target}" >/dev/null 2>&1; then
+        local rm_backup="n"
+        if [ "${INTERACTIVE_MODE:-false}" = "true" ] || [ -t 0 ]; then
+            safe_read_line "  › Rollback backup '${backup_target}' also exists. Remove backup as well? [y/N]: " "n" rm_backup
+        elif [ "${FORCE:-false}" = "true" ] || [ "${FORCE_UPDATE:-false}" = "true" ]; then
+            rm_backup="y"
+        fi
+
+        if [[ "$rm_backup" =~ ^[Yy] ]]; then
+            if is_interactive_tty; then
+                run_with_spinner "Removing backup '${backup_target}'" docker rm -f "${backup_target}"
+            else
+                docker rm -f "${backup_target}" >/dev/null
+            fi
+            log_info "Rollback backup container '${backup_target}' removed."
+        fi
+    fi
+
+    if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        log_success "Container '${CONTAINER_NAME}' removed successfully."
+    else
+        log_error "Failed to remove container '${CONTAINER_NAME}'."
+        return 1
+    fi
+}
+

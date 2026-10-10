@@ -148,6 +148,8 @@ ${C_BOLD}Usage:${C_RESET}
 ${C_BOLD}${C_CYAN}Commands:${C_RESET}
   ${C_BOLD}update${C_RESET}       Update a container (pull, safe stop, health check, rollback on fail) [default]
   ${C_BOLD}rollback${C_RESET}     Restore container to previous working backup
+  ${C_BOLD}stop${C_RESET}         Turn off (stop) a running container safely
+  ${C_BOLD}remove${C_RESET}       Remove (delete) a container
   ${C_BOLD}watch${C_RESET}        Continuously poll registry and update automatically on new image
   ${C_BOLD}webhook${C_RESET}      Run a lightweight webhook HTTP listener
   ${C_BOLD}status${C_RESET}       Show container status, health, ports, and backup state
@@ -162,7 +164,7 @@ ${C_BOLD}${C_CYAN}Options:${C_RESET}
   --health-interval <secs>   Time between health checks in seconds (default: 3)
   --health-url <url>         Custom HTTP check URL (e.g. http://localhost:8080/health)
   --health-cmd <cmd>         Custom shell command to check health
-  --force                    Force re-deployment even if image did not change
+  -f, --force                Force re-deployment or bypass interactive confirmation
   --interactive              Show interactive prompts
   --no-prune                 Do not clean up unused cache after update
   --no-animation             Disable live spinners and progress animations
@@ -174,6 +176,8 @@ ${C_BOLD}${C_CYAN}Options:${C_RESET}
 ${C_BOLD}${C_CYAN}Examples:${C_RESET}
   $(basename "${MAIN_SCRIPT:-$0}")                              # Opens interactive dashboard
   $(basename "${MAIN_SCRIPT:-$0}") update -c my-web-app         # Direct container update
+  $(basename "${MAIN_SCRIPT:-$0}") stop -c my-web-app           # Turn off container safely
+  $(basename "${MAIN_SCRIPT:-$0}") remove -c my-web-app         # Remove container
   $(basename "${MAIN_SCRIPT:-$0}") status -c my-web-app         # View container health card
   $(basename "${MAIN_SCRIPT:-$0}") rollback -c my-web-app       # Roll back to last backup
   $(basename "${MAIN_SCRIPT:-$0}") prune                        # Clean Docker cache
