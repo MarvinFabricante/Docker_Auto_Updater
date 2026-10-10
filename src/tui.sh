@@ -30,22 +30,32 @@ enter_fullscreen() {
 exit_fullscreen() {
     if [ "$IS_FULLSCREEN" = "true" ]; then
         IS_FULLSCREEN="false"
-        # Restore alternate scroll mode and leave alternate screen buffer
+        # Restore scroll mode and disable mouse tracking
         echo -ne "\033[?1007h" 2>/dev/null || true
         echo -ne "\033[?1000l\033[?1002l\033[?1003l\033[?1006l" 2>/dev/null || true
+        # Leave alternate screen buffer
         tput rmcup 2>/dev/null || echo -ne "\033[?1049l"
     fi
-    if [ -t 1 ]; then
-        echo -ne "\033[?25h\033[0m" 2>/dev/null || true
-        stty echo icanon < /dev/stdin 2>/dev/null || true
-    fi
+    # Always ensure cursor is visible, styling is reset, and terminal line discipline restored
+    echo -ne "\033[?25h\033[0m" 2>/dev/null || true
+    stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
 }
 
 cleanup_terminal() {
     exit_fullscreen
-    stty echo icanon < /dev/stdin 2>/dev/null || true
 }
-trap cleanup_terminal EXIT INT TERM
+
+handle_exit_signal() {
+    trap - EXIT INT TERM
+    exit_fullscreen
+    echo ""
+    echo -e "  ${C_DIM}Docker Auto-Updater closed.${C_RESET}"
+    echo ""
+    exit 0
+}
+
+trap cleanup_terminal EXIT
+trap handle_exit_signal INT TERM
 
 # Safe line reader that silently absorbs mouse scroll and arrow escape sequences
 safe_read_line() {
@@ -67,10 +77,7 @@ safe_read_line() {
     fi
 
     # Disable tty echo so escape sequences/scroll codes are NEVER echoed by the driver
-    stty -echo < /dev/stdin 2>/dev/null || true
-
-    # Drain any buffered escape sequences before reading
-    while read -rsn10 -t 0.001 _discard 2>/dev/null; do :; done
+    stty -echo 2>/dev/null || stty -echo < /dev/tty 2>/dev/null || true
 
     while true; do
         local char=""
@@ -105,9 +112,16 @@ safe_read_line() {
 
         # Ctrl+C
         if [ "$char" = $'\003' ]; then
-            stty echo icanon < /dev/stdin 2>/dev/null || true
+            stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
             printf "\n"
-            exit 130
+            return 130
+        fi
+
+        # Ctrl+D
+        if [ "$char" = $'\004' ]; then
+            stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
+            printf "\n"
+            return 1
         fi
 
         # Ctrl+U (erase whole line)
@@ -123,7 +137,7 @@ safe_read_line() {
         printf "%s" "$char"
     done
 
-    stty echo icanon < /dev/stdin 2>/dev/null || true
+    stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
 
     input_str="$(echo "$input_str" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     out_var="${input_str:-$default_val}"
@@ -143,14 +157,16 @@ get_menu_choice() {
         fi
     fi
 
-    stty -echo < /dev/stdin 2>/dev/null || true
-
-    # Drain any buffered escape sequences before reading
-    while read -rsn10 -t 0.001 _discard 2>/dev/null; do :; done
+    stty -echo 2>/dev/null || stty -echo < /dev/tty 2>/dev/null || true
 
     while true; do
         local key=""
-        IFS= read -rsn1 key || break
+        IFS= read -rsn1 key || {
+            # EOF (e.g. Ctrl+D)
+            stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
+            out_key="q"
+            return 0
+        }
 
         # Swallow escape sequences (mouse wheel scrolls, arrows, F-keys)
         if [ "$key" = $'\033' ]; then
@@ -170,19 +186,33 @@ get_menu_choice() {
 
         # Check for Ctrl+C
         if [ "$key" = $'\003' ]; then
-            stty echo icanon < /dev/stdin 2>/dev/null || true
-            exit 130
+            stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
+            exit_fullscreen
+            echo ""
+            echo -e "  ${C_CYAN}Docker Auto-Updater closed. Bye!${C_RESET}"
+            echo ""
+            exit 0
+        fi
+
+        # Check for Ctrl+D
+        if [ "$key" = $'\004' ]; then
+            stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
+            exit_fullscreen
+            echo ""
+            echo -e "  ${C_CYAN}Docker Auto-Updater closed. Bye!${C_RESET}"
+            echo ""
+            exit 0
         fi
 
         if [[ "$key" =~ ^[0-6qQ]$ ]]; then
             printf "%s\n" "$key"
             out_key="$key"
-            stty echo icanon < /dev/stdin 2>/dev/null || true
+            stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
             return 0
         fi
     done
 
-    stty echo icanon < /dev/stdin 2>/dev/null || true
+    stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
     return 1
 }
 
@@ -190,10 +220,8 @@ pause_and_return() {
     if [ "${INTERACTIVE_MODE:-false}" = "true" ] && is_interactive_tty; then
         echo ""
         echo -e "  ${C_DIM}───────────────────────────────────────────────────────────────────────────${C_RESET}"
-        printf "  Press [Enter] to return to dashboard... "
-        stty -echo < /dev/stdin 2>/dev/null || true
-        # Drain any buffered escape sequences before waiting
-        while read -rsn10 -t 0.001 _discard 2>/dev/null; do :; done
+        printf "  Press [Enter] to return to dashboard (or 'q' to exit)... "
+        stty -echo 2>/dev/null || stty -echo < /dev/tty 2>/dev/null || true
 
         while true; do
             local key=""
@@ -210,16 +238,30 @@ pause_and_return() {
                 continue
             fi
 
-            # Check for Enter or Ctrl+C
+            # Check for Enter
             if [ -z "$key" ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
                 break
             fi
-            if [ "$key" = $'\003' ]; then
-                stty echo icanon < /dev/stdin 2>/dev/null || true
-                exit 130
+
+            # Check for q, Q, or 0 to exit directly
+            if [ "$key" = "q" ] || [ "$key" = "Q" ] || [ "$key" = "0" ]; then
+                exit_fullscreen
+                echo ""
+                echo -e "  ${C_CYAN}Docker Auto-Updater closed. Bye!${C_RESET}"
+                echo ""
+                exit 0
+            fi
+
+            # Check for Ctrl+C or Ctrl+D
+            if [ "$key" = $'\003' ] || [ "$key" = $'\004' ]; then
+                exit_fullscreen
+                echo ""
+                echo -e "  ${C_CYAN}Docker Auto-Updater closed. Bye!${C_RESET}"
+                echo ""
+                exit 0
             fi
         done
-        stty echo icanon < /dev/stdin 2>/dev/null || true
+        stty echo icanon 2>/dev/null || stty echo icanon < /dev/tty 2>/dev/null || true
         echo ""
     fi
 }
@@ -324,15 +366,18 @@ prompt_container_selection() {
 
     echo -e "  ${C_CYAN}│${C_RESET} ${C_DIM}───────────────────────────────────────────────────────────────────────────────${C_RESET}"
     echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}0${C_RESET}    Enter name manually"
-    echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}c${C_RESET}    Cancel and return"
+    echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}q${C_RESET}    Back to main menu (or 'c' to cancel)"
     echo -e "  ${C_CYAN}╰────────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
     echo ""
 
     local choice=""
-    safe_read_line "  › Select container [number, name, or 'c' to cancel]: " "" choice
+    safe_read_line "  › Select container [number, name, or 'q' to back]: " "" choice
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        return 1
+    fi
 
-    if [ "$choice" = "c" ] || [ "$choice" = "C" ] || [ "$choice" = "cancel" ]; then
-        log_warn "Selection cancelled."
+    if [[ "$choice" =~ ^(c|C|cancel|q|Q|quit|back|exit)$ ]]; then
         return 1
     elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#containers[@]}" ]; then
         CONTAINER_NAME="${containers[$((choice - 1))]}"
@@ -368,14 +413,17 @@ prompt_update_details() {
         local detected_img
         detected_img=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo "")
         safe_read_line "  › Image to deploy [default: ${detected_img:-latest}]: " "${detected_img:-latest}" IMAGE_NAME
+        [ $? -ne 0 ] && return 1
     fi
 
     local input_stop=""
     safe_read_line "  › Stop wait time in seconds [default: ${STOP_TIMEOUT}]: " "${STOP_TIMEOUT}" input_stop
+    [ $? -ne 0 ] && return 1
     [ -n "$input_stop" ] && STOP_TIMEOUT="$input_stop"
 
     local input_health=""
     safe_read_line "  › Health check wait time in seconds [default: ${HEALTH_TIMEOUT}]: " "${HEALTH_TIMEOUT}" input_health
+    [ $? -ne 0 ] && return 1
     [ -n "$input_health" ] && HEALTH_TIMEOUT="$input_health"
 
     echo ""
@@ -457,6 +505,7 @@ render_fullscreen_dashboard() {
 do_watch_interactive() {
     local input_int=""
     safe_read_line "  › Check interval in seconds [default: ${WATCH_INTERVAL}]: " "${WATCH_INTERVAL}" input_int
+    [ $? -ne 0 ] && return 1
     [ -n "$input_int" ] && WATCH_INTERVAL="$input_int"
     do_watch
 }
@@ -464,9 +513,11 @@ do_watch_interactive() {
 do_webhook_interactive() {
     local input_port=""
     safe_read_line "  › Webhook port [default: ${WEBHOOK_PORT}]: " "${WEBHOOK_PORT}" input_port
+    [ $? -ne 0 ] && return 1
     [ -n "$input_port" ] && WEBHOOK_PORT="$input_port"
     local input_sec=""
     safe_read_line "  › Secret token (optional) [default: ${WEBHOOK_SECRET}]: " "${WEBHOOK_SECRET}" input_sec
+    [ $? -ne 0 ] && return 1
     [ -n "$input_sec" ] && WEBHOOK_SECRET="$input_sec"
     do_webhook
 }
@@ -484,7 +535,9 @@ interactive_menu() {
         printf "  › Select option [0-6] or [q] to exit: "
         if ! get_menu_choice menu_choice; then
             exit_fullscreen
-            echo "Bye!"
+            echo ""
+            echo -e "  ${C_CYAN}Docker Auto-Updater closed. Bye!${C_RESET}"
+            echo ""
             exit 0
         fi
 
@@ -493,41 +546,51 @@ interactive_menu() {
                 clear_screen
                 CONTAINER_NAME=""
                 IMAGE_NAME=""
-                ( prompt_update_details && do_update ) || true
-                pause_and_return
+                if prompt_update_details; then
+                    do_update || true
+                    pause_and_return
+                fi
                 ;;
             2)
                 clear_screen
                 CONTAINER_NAME=""
-                ( prompt_container_selection && do_status ) || true
-                pause_and_return
+                if prompt_container_selection; then
+                    do_status || true
+                    pause_and_return
+                fi
                 ;;
             3)
                 clear_screen
                 CONTAINER_NAME=""
-                ( prompt_container_selection && do_manual_rollback ) || true
-                pause_and_return
+                if prompt_container_selection; then
+                    do_manual_rollback || true
+                    pause_and_return
+                fi
                 ;;
             4)
                 clear_screen
                 echo ""
-                ( do_prune ) || true
+                do_prune || true
                 pause_and_return
                 ;;
             5)
                 clear_screen
                 CONTAINER_NAME=""
-                ( prompt_container_selection && do_watch_interactive ) || true
-                pause_and_return
+                if prompt_container_selection; then
+                    do_watch_interactive || true
+                    pause_and_return
+                fi
                 ;;
             6)
                 clear_screen
-                ( do_webhook_interactive ) || true
+                do_webhook_interactive || true
                 pause_and_return
                 ;;
-            0|[Qq]|[Qq][Uu][Ii][Tt])
+            0|[Qq]|[Qq][Uu][Ii][Tt]|"exit")
                 exit_fullscreen
-                echo "Bye!"
+                echo ""
+                echo -e "  ${C_CYAN}Docker Auto-Updater closed. Bye!${C_RESET}"
+                echo ""
                 exit 0
                 ;;
             *)

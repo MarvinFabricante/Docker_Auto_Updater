@@ -462,7 +462,10 @@ do_watch() {
     echo ""
 
     local cycle=1
-    while true; do
+    local stop_watching=false
+    trap 'stop_watching=true' INT
+
+    while [ "$stop_watching" = "false" ]; do
         local ts
         ts="$(date '+%H:%M:%S')"
         log_step "[${ts}] Cycle #${cycle}: Checking registry for new image..."
@@ -471,8 +474,13 @@ do_watch() {
         }
         ((cycle++))
 
+        if [ "$stop_watching" = "true" ]; then
+            break
+        fi
+
         if is_interactive_tty; then
             for (( w=${WATCH_INTERVAL:-60}; w>0; w-- )); do
+                if [ "$stop_watching" = "true" ]; then break; fi
                 local frame="${SPIN_CHARS[$(( (${WATCH_INTERVAL:-60} - w) % ${#SPIN_CHARS[@]} ))]}"
                 printf "\r  ${C_CYAN}%s${C_RESET} Next check in ${C_BOLD}%ds${C_RESET}... ${C_DIM}(Ctrl+C to stop)${C_RESET}\033[K" "$frame" "$w"
                 sleep 1
@@ -482,6 +490,10 @@ do_watch() {
             sleep "${WATCH_INTERVAL:-60}"
         fi
     done
+
+    trap handle_exit_signal INT TERM
+    echo ""
+    log_info "Watch mode stopped."
 }
 
 # Container Status
