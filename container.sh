@@ -2,6 +2,18 @@
 # Docker Container Auto-Updater
 # The main entry point (parses arguments, routes to modules)
 
+# If sourced in an interactive shell (e.g. 'source container.sh'), run in an isolated subshell
+# so exiting the application returns to your prompt and does NOT close your terminal window.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    if [ "$0" != "${(%):-%x}" ]; then
+        bash "${(%):-%x}" "$@"
+        return $? 2>/dev/null || return 0
+    fi
+elif [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    bash "${BASH_SOURCE[0]}" "$@"
+    return $? 2>/dev/null || return 0
+fi
+
 set -Eeuo pipefail
 shopt -s extglob 2>/dev/null || true
 
