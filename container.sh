@@ -426,14 +426,154 @@ clean_dangling_caches() {
     log_success "Dangling Docker caches and images pruned successfully."
 }
 
-# Core Update Workflow
-do_update() {
-    check_dependencies
+# ------------------------------------------------------------------------------
+# Interactive User Input Prompts (Terminal Mode)
+# ------------------------------------------------------------------------------
+prompt_container_selection() {
+    if [ -n "${CONTAINER_NAME}" ]; then
+        return 0
+    fi
 
-    if [ -z "${CONTAINER_NAME}" ]; then
+    # Check if running in an interactive terminal
+    if [ ! -t 0 ]; then
         log_error "No container specified! Use --container <name> or set CONTAINER_NAME in .env"
         exit 1
     fi
+
+    echo -e "\n${C_BOLD}Active Containers on this host:${C_RESET}"
+    local containers=()
+    local i=1
+
+    while IFS=$'\t' read -r name status image; do
+        if [ -n "$name" ]; then
+            containers+=("$name")
+            printf "  [%2d] %-30s %-25s (%s)\n" "$i" "$name" "$image" "$status"
+            ((i++))
+        fi
+    done < <(docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true)
+
+    if [ ${#containers[@]} -eq 0 ]; then
+        echo "  (No existing containers found)"
+    fi
+    echo "  [ 0] Enter custom container name manually"
+    echo ""
+
+    local choice
+    read -r -p "Piliin ang container [Number o Name]: " choice
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#containers[@]}" ]; then
+        CONTAINER_NAME="${containers[$((choice - 1))]}"
+    elif [ "$choice" = "0" ] || [ -z "$choice" ]; then
+        read -r -p "I-type ang pangalan ng container: " CONTAINER_NAME
+    else
+        CONTAINER_NAME="$choice"
+    fi
+
+    if [ -z "${CONTAINER_NAME}" ]; then
+        log_error "Walang container na napili. Kinakansela ang operasyon."
+        exit 1
+    fi
+}
+
+prompt_update_details() {
+    prompt_container_selection
+
+    # Only prompt for further parameters if interactive mode was explicitly requested or in interactive menu
+    if [ "${INTERACTIVE_MODE:-false}" != "true" ] || [ ! -t 0 ]; then
+        return 0
+    fi
+
+    # Auto-detect image from container if not set
+    if [ -z "${IMAGE_NAME}" ]; then
+        local detected_img
+        detected_img=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo "")
+        read -r -p "Docker Image to deploy [default: ${detected_img:-latest}]: " input_img
+        IMAGE_NAME="${input_img:-$detected_img}"
+    fi
+
+    read -r -p "Graceful stop timeout in seconds [default: ${STOP_TIMEOUT}]: " input_stop
+    if [ -n "$input_stop" ]; then
+        STOP_TIMEOUT="$input_stop"
+    fi
+
+    read -r -p "Health check timeout in seconds [default: ${HEALTH_TIMEOUT}]: " input_health
+    if [ -n "$input_health" ]; then
+        HEALTH_TIMEOUT="$input_health"
+    fi
+
+    echo ""
+    echo -e "${C_CYAN}Summary ng Deployment:${C_RESET}"
+    echo "  Target Container : ${CONTAINER_NAME}"
+    echo "  Target Image     : ${IMAGE_NAME}"
+    echo "  Stop Timeout     : ${STOP_TIMEOUT}s"
+    echo "  Health Timeout   : ${HEALTH_TIMEOUT}s"
+    echo ""
+    read -r -p "Ituloy ang update? [Y/n]: " confirm
+    if [[ "$confirm" =~ ^[Nn] ]]; then
+        log_warn "Kinansela ng user ang deployment."
+        exit 0
+    fi
+}
+
+interactive_menu() {
+    export INTERACTIVE_MODE="true"
+    echo -e "\n${C_BOLD}=====================================================${C_RESET}"
+    echo -e "${C_BOLD}  🐳 Docker Container Auto-Updater & Deployment Menu ${C_RESET}"
+    echo -e "${C_BOLD}=====================================================${C_RESET}"
+    echo "  1) Update a container (Graceful Stop, Pull, Health Check, Auto-Rollback)"
+    echo "  2) Check container status & health"
+    echo "  3) Roll back container to previous backup"
+    echo "  4) Prune dangling Docker caches & untagged images"
+    echo "  5) Start continuous registry watcher (auto-update on push)"
+    echo "  6) Start HTTP webhook listener daemon"
+    echo "  7) Exit"
+    echo ""
+    read -r -p "Piliin ang aksyon [1-7]: " menu_choice
+
+    case "$menu_choice" in
+        1)
+            prompt_update_details
+            do_update
+            ;;
+        2)
+            prompt_container_selection
+            do_status
+            ;;
+        3)
+            prompt_container_selection
+            do_manual_rollback
+            ;;
+        4)
+            do_prune
+            ;;
+        5)
+            prompt_container_selection
+            read -r -p "Polling interval in seconds [default: ${WATCH_INTERVAL}]: " input_int
+            [ -n "$input_int" ] && WATCH_INTERVAL="$input_int"
+            do_watch
+            ;;
+        6)
+            read -r -p "Webhook port [default: ${WEBHOOK_PORT}]: " input_port
+            [ -n "$input_port" ] && WEBHOOK_PORT="$input_port"
+            read -r -p "Webhook secret token (optional) [default: ${WEBHOOK_SECRET}]: " input_sec
+            [ -n "$input_sec" ] && WEBHOOK_SECRET="$input_sec"
+            do_webhook
+            ;;
+        7)
+            echo "Salamat at paalam!"
+            exit 0
+            ;;
+        *)
+            log_error "Hindi wastong pagpipilian."
+            exit 1
+            ;;
+    esac
+}
+
+# Core Update Workflow
+do_update() {
+    check_dependencies
+    prompt_update_details
 
     log_step "Initializing deployment workflow for container: ${C_BOLD}${CONTAINER_NAME}${C_RESET}"
 
@@ -601,20 +741,14 @@ sys.exit(res.returncode)
 # Manual Rollback Subcommand
 do_manual_rollback() {
     check_dependencies
-    if [ -z "${CONTAINER_NAME}" ]; then
-        log_error "No container specified! Use --container <name>"
-        exit 1
-    fi
+    prompt_container_selection
     rollback_container "${CONTAINER_NAME}"
 }
 
 # Continuous Watch / Poll Mode
 do_watch() {
     check_dependencies
-    if [ -z "${CONTAINER_NAME}" ]; then
-        log_error "No container specified! Use --container <name>"
-        exit 1
-    fi
+    prompt_container_selection
 
     log_info "Starting registry polling watcher for '${CONTAINER_NAME}' (interval: ${WATCH_INTERVAL}s)..."
     log_info "Press Ctrl+C to terminate."
@@ -707,10 +841,7 @@ with socketserver.TCPServer(("", port), WebhookHandler) as httpd:
 # Container & Health Status Report
 do_status() {
     check_dependencies
-    if [ -z "${CONTAINER_NAME}" ]; then
-        log_error "No container specified! Use --container <name>"
-        exit 1
-    fi
+    prompt_container_selection
 
     if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
         log_error "Container '${CONTAINER_NAME}' does not exist."
@@ -796,6 +927,12 @@ Examples:
 main() {
     load_config
 
+    # If called with no arguments in an interactive terminal, show interactive menu
+    if [ $# -eq 0 ] && [ -t 0 ]; then
+        interactive_menu
+        exit 0
+    fi
+
     local command="update"
     if [ $# -gt 0 ] && [[ "$1" =~ ^(update|rollback|watch|webhook|status|prune|help|-h|--help)$ ]]; then
         command="$1"
@@ -863,6 +1000,10 @@ main() {
                 ;;
             --dry-run)
                 DRY_RUN="true"
+                shift
+                ;;
+            --interactive)
+                INTERACTIVE_MODE="true"
                 shift
                 ;;
             -v|--verbose)

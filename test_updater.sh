@@ -48,6 +48,7 @@ EOF
 
 # 2. Start initial container with v1
 echo -e "\n 2. Launching initial container '${TEST_CONTAINER}' with image '${TEST_IMAGE_V1}'..."
+docker rm -f "${TEST_CONTAINER}" "${TEST_CONTAINER}_rollback" 2>/dev/null || true
 docker run -d --name "${TEST_CONTAINER}" -p 18080:8080 "${TEST_IMAGE_V1}"
 
 echo "Waiting for initial container to report healthy..."
