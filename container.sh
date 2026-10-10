@@ -3,6 +3,7 @@
 # A simple, safe tool to update Docker containers with auto-rollback.
 
 set -Eeuo pipefail
+shopt -s extglob 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/.env}"
@@ -88,6 +89,10 @@ enter_fullscreen() {
     if is_interactive_tty && [ "$IS_FULLSCREEN" != "true" ]; then
         IS_FULLSCREEN="true"
         tput smcup 2>/dev/null || echo -ne "\033[?1049h"
+        # Turn off alternate scroll mode (DEC 1007) so mouse scrolling does NOT emit cursor keys
+        echo -ne "\033[?1007l" 2>/dev/null || true
+        # Also turn off any xterm mouse tracking modes to prevent mouse reporting escape codes
+        echo -ne "\033[?1000l\033[?1002l\033[?1003l\033[?1006l" 2>/dev/null || true
         clear_screen
     fi
 }
@@ -95,23 +100,197 @@ enter_fullscreen() {
 exit_fullscreen() {
     if [ "$IS_FULLSCREEN" = "true" ]; then
         IS_FULLSCREEN="false"
+        # Restore alternate scroll mode and leave alternate screen buffer
+        echo -ne "\033[?1007h" 2>/dev/null || true
+        echo -ne "\033[?1000l\033[?1002l\033[?1003l\033[?1006l" 2>/dev/null || true
         tput rmcup 2>/dev/null || echo -ne "\033[?1049l"
     fi
     if [ -t 1 ]; then
         echo -ne "\033[?25h\033[0m" 2>/dev/null || true
+        stty echo icanon < /dev/stdin 2>/dev/null || true
     fi
 }
 
 cleanup_terminal() {
     exit_fullscreen
+    stty echo icanon < /dev/stdin 2>/dev/null || true
 }
 trap cleanup_terminal EXIT INT TERM
+
+# Safe line reader that silently absorbs mouse scroll and arrow escape sequences
+safe_read_line() {
+    local prompt="$1"
+    local default_val="${2:-}"
+    local -n out_var="$3"
+    local input_str=""
+
+    printf "%s" "$prompt"
+
+    if [ ! -t 0 ]; then
+        if IFS= read -r input_str; then
+            input_str="${input_str%$'\r'}"
+            out_var="${input_str:-$default_val}"
+            return 0
+        else
+            return 1
+        fi
+    fi
+
+    # Disable tty echo so escape sequences/scroll codes are NEVER echoed by the driver
+    stty -echo < /dev/stdin 2>/dev/null || true
+
+    # Drain any buffered escape sequences before reading
+    while read -rsn10 -t 0.001 _discard 2>/dev/null; do :; done
+
+    while true; do
+        local char=""
+        IFS= read -rsn1 char || break
+
+        # Enter key finishes line
+        if [ "$char" = "" ] || [ "$char" = $'\n' ] || [ "$char" = $'\r' ]; then
+            printf "\n"
+            break
+        fi
+
+        # Escape sequences: swallow the entire sequence!
+        # Covers cursor keys, DEC 1007 scroll keys, SGR mouse reporting (\033[<...M)
+        if [ "$char" = $'\033' ]; then
+            local next_ch=""
+            while read -rsn1 -t 0.05 next_ch; do
+                if [[ "$next_ch" =~ [A-Za-z~] ]]; then
+                    break
+                fi
+            done
+            continue
+        fi
+
+        # Backspace / Delete
+        if [ "$char" = $'\177' ] || [ "$char" = $'\b' ]; then
+            if [ -n "$input_str" ]; then
+                input_str="${input_str%?}"
+                printf "\b \b"
+            fi
+            continue
+        fi
+
+        # Ctrl+C
+        if [ "$char" = $'\003' ]; then
+            stty echo icanon < /dev/stdin 2>/dev/null || true
+            printf "\n"
+            exit 130
+        fi
+
+        # Ctrl+U (erase whole line)
+        if [ "$char" = $'\025' ]; then
+            while [ -n "$input_str" ]; do
+                input_str="${input_str%?}"
+                printf "\b \b"
+            done
+            continue
+        fi
+
+        input_str+="$char"
+        printf "%s" "$char"
+    done
+
+    stty echo icanon < /dev/stdin 2>/dev/null || true
+
+    input_str="$(echo "$input_str" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    out_var="${input_str:-$default_val}"
+    return 0
+}
+
+# Single-key menu reader that silently absorbs mouse scroll and arrow escape sequences
+get_menu_choice() {
+    local -n out_key="$1"
+    out_key=""
+
+    if [ ! -t 0 ]; then
+        if read -r out_key; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+
+    stty -echo < /dev/stdin 2>/dev/null || true
+
+    # Drain any buffered escape sequences before reading
+    while read -rsn10 -t 0.001 _discard 2>/dev/null; do :; done
+
+    while true; do
+        local key=""
+        IFS= read -rsn1 key || break
+
+        # Swallow escape sequences (mouse wheel scrolls, arrows, F-keys)
+        if [ "$key" = $'\033' ]; then
+            local next_ch=""
+            while read -rsn1 -t 0.05 next_ch; do
+                if [[ "$next_ch" =~ [A-Za-z~] ]]; then
+                    break
+                fi
+            done
+            continue
+        fi
+
+        # Ignore empty key or accidental enter
+        if [ -z "$key" ]; then
+            continue
+        fi
+
+        # Check for Ctrl+C
+        if [ "$key" = $'\003' ]; then
+            stty echo icanon < /dev/stdin 2>/dev/null || true
+            exit 130
+        fi
+
+        if [[ "$key" =~ ^[0-6qQ]$ ]]; then
+            printf "%s\n" "$key"
+            out_key="$key"
+            stty echo icanon < /dev/stdin 2>/dev/null || true
+            return 0
+        fi
+    done
+
+    stty echo icanon < /dev/stdin 2>/dev/null || true
+    return 1
+}
 
 pause_and_return() {
     if [ "${INTERACTIVE_MODE:-false}" = "true" ] && is_interactive_tty; then
         echo ""
         echo -e "  ${C_DIM}───────────────────────────────────────────────────────────────────────────${C_RESET}"
-        read -r -p "  Press [Enter] to return to dashboard... " _
+        printf "  Press [Enter] to return to dashboard... "
+        stty -echo < /dev/stdin 2>/dev/null || true
+        # Drain any buffered escape sequences before waiting
+        while read -rsn10 -t 0.001 _discard 2>/dev/null; do :; done
+
+        while true; do
+            local key=""
+            IFS= read -rsn1 key || break
+
+            # Swallow escape sequences (scrolls, arrows, mouse codes)
+            if [ "$key" = $'\033' ]; then
+                local next_ch=""
+                while read -rsn1 -t 0.05 next_ch; do
+                    if [[ "$next_ch" =~ [A-Za-z~] ]]; then
+                        break
+                    fi
+                done
+                continue
+            fi
+
+            # Check for Enter or Ctrl+C
+            if [ -z "$key" ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
+                break
+            fi
+            if [ "$key" = $'\003' ]; then
+                stty echo icanon < /dev/stdin 2>/dev/null || true
+                exit 130
+            fi
+        done
+        stty echo icanon < /dev/stdin 2>/dev/null || true
+        echo ""
     fi
 }
 
@@ -624,8 +803,8 @@ prompt_container_selection() {
     echo -e "  ${C_CYAN}╰────────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
     echo ""
 
-    local choice
-    read -r -p "  › Select container [number, name, or 'c' to cancel]: " choice
+    local choice=""
+    safe_read_line "  › Select container [number, name, or 'c' to cancel]: " "" choice
 
     if [ "$choice" = "c" ] || [ "$choice" = "C" ] || [ "$choice" = "cancel" ]; then
         log_warn "Selection cancelled."
@@ -633,13 +812,21 @@ prompt_container_selection() {
     elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#containers[@]}" ]; then
         CONTAINER_NAME="${containers[$((choice - 1))]}"
     elif [ "$choice" = "0" ]; then
-        read -r -p "  › Container name: " CONTAINER_NAME
+        safe_read_line "  › Container name: " "" CONTAINER_NAME
+    elif [[ "$choice" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid selection number '${choice}'. Please select 1-${#containers[@]} or 0."
+        return 1
     else
         CONTAINER_NAME="$choice"
     fi
 
     if [ -z "${CONTAINER_NAME}" ]; then
         log_error "No container selected."
+        return 1
+    fi
+
+    if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        log_error "Container '${CONTAINER_NAME}' does not exist on this system."
         return 1
     fi
 }
@@ -655,18 +842,19 @@ prompt_update_details() {
     if [ -z "${IMAGE_NAME}" ]; then
         local detected_img
         detected_img=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo "")
-        read -r -p "  › Image to deploy [default: ${detected_img:-latest}]: " input_img
-        IMAGE_NAME="${input_img:-$detected_img}"
+        safe_read_line "  › Image to deploy [default: ${detected_img:-latest}]: " "${detected_img:-latest}" IMAGE_NAME
     fi
 
-    read -r -p "  › Stop wait time in seconds [default: ${STOP_TIMEOUT}]: " input_stop
+    local input_stop=""
+    safe_read_line "  › Stop wait time in seconds [default: ${STOP_TIMEOUT}]: " "${STOP_TIMEOUT}" input_stop
     [ -n "$input_stop" ] && STOP_TIMEOUT="$input_stop"
 
-    read -r -p "  › Health check wait time in seconds [default: ${HEALTH_TIMEOUT}]: " input_health
+    local input_health=""
+    safe_read_line "  › Health check wait time in seconds [default: ${HEALTH_TIMEOUT}]: " "${HEALTH_TIMEOUT}" input_health
     [ -n "$input_health" ] && HEALTH_TIMEOUT="$input_health"
 
     echo ""
-    echo -e "  ${C_CYAN}╭── 🚀 Container Deployment Plan ─────────────────────────────╮${C_RESET}"
+    echo -e "  ${C_CYAN}╭──   Container Deployment Plan ─────────────────────────────╮${C_RESET}"
     printf "  ${C_CYAN}│${C_RESET}  Target Container : ${C_BOLD}%s${C_RESET}\n" "${CONTAINER_NAME}"
     printf "  ${C_CYAN}│${C_RESET}  Target Image     : ${C_CYAN}%s${C_RESET}\n" "${IMAGE_NAME}"
     printf "  ${C_CYAN}│${C_RESET}  Graceful Stop    : %ss\n" "${STOP_TIMEOUT}"
@@ -675,7 +863,8 @@ prompt_update_details() {
     printf "  ${C_CYAN}│${C_RESET}  Auto-Prune Cache : %s\n" "${AUTO_PRUNE}"
     echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
     echo ""
-    read -r -p "  › Start update now? [Y/n]: " confirm
+    local confirm=""
+    safe_read_line "  › Start update now? [Y/n]: " "y" confirm
     if [[ "$confirm" =~ ^[Nn] ]]; then
         log_warn "Update cancelled."
         return 1
@@ -692,12 +881,12 @@ render_fullscreen_dashboard() {
 
     echo ""
     echo -e "  ${C_CYAN}╭─────────────────────────────────────────────────────────────────────────────╮${C_RESET}"
-    echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}${C_CYAN}🐳  D O C K E R   A U T O - U P D A T E R   v 2 . 0${C_RESET}                           ${C_CYAN}│${C_RESET}"
+    echo -e "  ${C_CYAN}│${C_RESET}${C_BOLD}${C_CYAN}🐳  D O C K E R   A U T O - U P D A T E R   v 2 . 0${C_RESET}                           ${C_CYAN}│${C_RESET}"
     echo -e "  ${C_CYAN}│${C_RESET}   ${C_DIM}Zero-Downtime Safe Deployments • Health Checks • Auto-Rollback${C_RESET}            ${C_CYAN}│${C_RESET}"
     echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
     echo -e "    ${C_DIM}Engine:${C_RESET} ${C_BOLD}Docker ${docker_ver}${C_RESET}  ${C_DIM}•${C_RESET}  ${C_GREEN}${running_cnt} active${C_RESET} ${C_DIM}/ ${total_cnt} total containers${C_RESET}  ${C_DIM}•${C_RESET}  ${C_CYAN}Full-Screen TUI Active${C_RESET}"
     echo ""
-    echo -e "  ${C_CYAN}╭── 📦 Active Containers ─────────────────────────────────────────────────────╮${C_RESET}"
+    echo -e "  ${C_CYAN}╭──   Active Containers ─────────────────────────────────────────────────────╮${C_RESET}"
     printf "  ${C_CYAN}│${C_RESET}  ${C_BOLD}%-24s  %-24s  %-18s${C_RESET}\n" "CONTAINER" "IMAGE" "STATUS"
     echo -e "  ${C_CYAN}│${C_RESET}  ${C_DIM}───────────────────────────────────────────────────────────────────────────${C_RESET}"
 
@@ -727,29 +916,32 @@ render_fullscreen_dashboard() {
     echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
     echo ""
     echo -e "  ${C_BOLD}${C_CYAN}OPERATIONS & CONTROLS${C_RESET}"
-    echo -e "    ${C_GREEN}[1]${C_RESET} 🚀  ${C_BOLD}Update Container${C_RESET}     ${C_DIM}Deploy new image with safety health checks${C_RESET}"
-    echo -e "    ${C_CYAN}[2]${C_RESET} 🔍  ${C_BOLD}Inspect Status${C_RESET}       ${C_DIM}View deep health, IP, ports & rollback status${C_RESET}"
-    echo -e "    ${C_YELLOW}[3]${C_RESET} ⏪  ${C_BOLD}Quick Rollback${C_RESET}       ${C_DIM}Immediately restore last known backup${C_RESET}"
-    echo -e "    ${C_MAGENTA}[4]${C_RESET} 🧹  ${C_BOLD}Prune Cache${C_RESET}          ${C_DIM}Reclaim space from dangling images & build cache${C_RESET}"
+    echo -e "    ${C_GREEN}[1]${C_RESET}    ${C_BOLD}Update Container${C_RESET}     ${C_DIM}Deploy new image with safety health checks${C_RESET}"
+    echo -e "    ${C_CYAN}[2]${C_RESET}    ${C_BOLD}Inspect Status${C_RESET}       ${C_DIM}View deep health, IP, ports & rollback status${C_RESET}"
+    echo -e "    ${C_YELLOW}[3]${C_RESET}    ${C_BOLD}Quick Rollback${C_RESET}       ${C_DIM}Immediately restore last known backup${C_RESET}"
+    echo -e "    ${C_MAGENTA}[4]${C_RESET}    ${C_BOLD}Prune Cache${C_RESET}          ${C_DIM}Reclaim space from dangling images & build cache${C_RESET}"
     echo ""
     echo -e "  ${C_BOLD}${C_CYAN}DAEMONS & AUTOMATION${C_RESET}"
-    echo -e "    ${C_BLUE}[5]${C_RESET} ⏱️   ${C_BOLD}Watch Registry${C_RESET}       ${C_DIM}Continuously monitor registry & auto-deploy${C_RESET}"
-    echo -e "    ${C_BLUE}[6]${C_RESET} 🔗  ${C_BOLD}Webhook Listener${C_RESET}     ${C_DIM}Run HTTP listener for CI/CD deployments${C_RESET}"
+    echo -e "    ${C_BLUE}[5]${C_RESET}     ${C_BOLD}Watch Registry${C_RESET}       ${C_DIM}Continuously monitor registry & auto-deploy${C_RESET}"
+    echo -e "    ${C_BLUE}[6]${C_RESET}    ${C_BOLD}Webhook Listener${C_RESET}     ${C_DIM}Run HTTP listener for CI/CD deployments${C_RESET}"
     echo ""
-    echo -e "    ${C_DIM}[0] 🚪  Exit Application (or 'q')${C_RESET}"
+    echo -e "    ${C_DIM}[0]  Exit Application (or 'q')${C_RESET}"
     echo ""
 }
 
 do_watch_interactive() {
-    read -r -p "  › Check interval in seconds [default: ${WATCH_INTERVAL}]: " input_int
+    local input_int=""
+    safe_read_line "  › Check interval in seconds [default: ${WATCH_INTERVAL}]: " "${WATCH_INTERVAL}" input_int
     [ -n "$input_int" ] && WATCH_INTERVAL="$input_int"
     do_watch
 }
 
 do_webhook_interactive() {
-    read -r -p "  › Webhook port [default: ${WEBHOOK_PORT}]: " input_port
+    local input_port=""
+    safe_read_line "  › Webhook port [default: ${WEBHOOK_PORT}]: " "${WEBHOOK_PORT}" input_port
     [ -n "$input_port" ] && WEBHOOK_PORT="$input_port"
-    read -r -p "  › Secret token (optional) [default: ${WEBHOOK_SECRET}]: " input_sec
+    local input_sec=""
+    safe_read_line "  › Secret token (optional) [default: ${WEBHOOK_SECRET}]: " "${WEBHOOK_SECRET}" input_sec
     [ -n "$input_sec" ] && WEBHOOK_SECRET="$input_sec"
     do_webhook
 }
@@ -763,8 +955,13 @@ interactive_menu() {
     while true; do
         render_fullscreen_dashboard
 
-        local menu_choice
-        read -r -p "  › Select option [0-6] or [q] to exit: " menu_choice
+        local menu_choice=""
+        printf "  › Select option [0-6] or [q] to exit: "
+        if ! get_menu_choice menu_choice; then
+            exit_fullscreen
+            echo "Bye!"
+            exit 0
+        fi
 
         case "$menu_choice" in
             1)
@@ -964,7 +1161,7 @@ do_watch() {
     prompt_container_selection
 
     echo ""
-    echo -e "  ${C_CYAN}╭── ⏱️  Continuous Watch Active ──────────────────────────────╮${C_RESET}"
+    echo -e "  ${C_CYAN}╭──    Continuous Watch Active ──────────────────────────────╮${C_RESET}"
     printf "  ${C_CYAN}│${C_RESET}  Target Container : ${C_BOLD}%s${C_RESET}\n" "${CONTAINER_NAME}"
     printf "  ${C_CYAN}│${C_RESET}  Polling Interval : %ss\n" "${WATCH_INTERVAL}"
     echo -e "  ${C_CYAN}│${C_RESET}  Task             : Checking Docker registry for image updates"
@@ -999,10 +1196,10 @@ do_watch() {
 do_webhook() {
     check_dependencies
     echo ""
-    echo -e "  ${C_CYAN}╭── 🔗 Docker Webhook Server Online ──────────────────────────╮${C_RESET}"
+    echo -e "  ${C_CYAN}╭──   Docker Webhook Server Online ──────────────────────────╮${C_RESET}"
     printf "  ${C_CYAN}│${C_RESET}  Endpoint : ${C_BOLD}${C_CYAN}http://0.0.0.0:%s/webhook${C_RESET}\n" "${WEBHOOK_PORT}"
     if [ -n "${WEBHOOK_SECRET}" ]; then
-        echo -e "  ${C_CYAN}│${C_RESET}  Security : ${C_GREEN}🔒 Protected by secret token${C_RESET}"
+        echo -e "  ${C_CYAN}│${C_RESET}  Security : ${C_GREEN} Protected by secret token${C_RESET}"
     else
         echo -e "  ${C_CYAN}│${C_RESET}  Security : ${C_YELLOW}▲ Open endpoint (no secret configured)${C_RESET}"
     fi
@@ -1106,7 +1303,7 @@ do_status() {
     elif [ "$st_health" = "unhealthy" ]; then
         health_badge="${C_RED}✖ UNHEALTHY${C_RESET} (failing checks)"
     elif [ "$st_health" = "starting" ]; then
-        health_badge="${C_YELLOW}⏳ STARTING${C_RESET} (awaiting health)"
+        health_badge="${C_YELLOW}  STARTING${C_RESET} (awaiting health)"
     else
         health_badge="${C_DIM}None configured${C_RESET}"
     fi
@@ -1114,11 +1311,11 @@ do_status() {
     local backup_target="${CONTAINER_NAME}${BACKUP_SUFFIX}"
     local backup_info="${C_DIM}No backup active${C_RESET}"
     if docker inspect "${backup_target}" >/dev/null 2>&1; then
-        backup_info="${C_GREEN}🛡️  Backup container exists (${backup_target})${C_RESET}"
+        backup_info="${C_GREEN}   Backup container exists (${backup_target})${C_RESET}"
     fi
 
     echo ""
-    echo -e "  ${C_CYAN}╭── 🔍 Container Status: ${CONTAINER_NAME} ──────────────────────────────────────╮${C_RESET}"
+    echo -e "  ${C_CYAN}╭──  Container Status: ${CONTAINER_NAME} ──────────────────────────────────────╮${C_RESET}"
     printf "  ${C_CYAN}│${C_RESET}  %-14s : %b\n" "State" "$status_badge"
     printf "  ${C_CYAN}│${C_RESET}  %-14s : %b\n" "Health" "$health_badge"
     printf "  ${C_CYAN}│${C_RESET}  %-14s : %s\n" "Image" "$st_image"
