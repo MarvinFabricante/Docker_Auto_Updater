@@ -14,12 +14,12 @@ When a new image is pushed:
 
 ## Quick Start
 
-### 1. Interactive Menu
-Just run the script without any options:
+### 1. Interactive Full-Screen Application
+Just run the script without any options (or `./container.sh menu`):
 ```bash
 ./container.sh
 ```
-It shows a clean menu where you can pick a container to update, check its status, or roll back.
+Launches an immersive, full-screen terminal application (TUI) with a live container overview, categorized operations, in-app navigation, animated progress indicators, and persistent screen loop. Press `q` or `0` to cleanly return to your shell.
 
 ### 2. Update a Container Directly
 ```bash
@@ -89,6 +89,19 @@ You can set these in a `.env` file or pass them as options:
 | `WATCH_INTERVAL` | `60` | How often to check registry in watch mode |
 | `WEBHOOK_PORT` | `9000` | Port for the webhook server |
 | `WEBHOOK_SECRET` | _None_ | Secret token to secure the webhook |
+| `NO_ANIMATION` | `false` | Disable animated spinners and live progress bars |
+| `NO_COLOR` | _None_ | Disable ANSI colors (`--no-color` or `NO_COLOR=1`) |
+
+---
+
+## UI/UX & Animation Features
+
+- **Live Animated Spinners & Tickers**: Smooth Braille spinners (`⠋ ⠙ ⠹...`) for Docker pulls, graceful container shutdowns, and cache pruning with real-time elapsed seconds.
+- **Dynamic Health Progress Bar**: Real-time visual progress bar (`[████░░░░░░░░░░]`) and state indicator (`starting`, `healthy`, `unhealthy`) during container verification.
+- **Interactive Container Dashboard**: Formatted table of local containers with status badges (🟢 Up, 🔴 Exited, 🟡 Restarting) and mapped ports.
+- **Pre-flight Deployment Confirmation**: Styled summary card detailing container name, image digest, timeout thresholds, and safety rollback targets before execution.
+- **Visual Alert Banners**: Highlighted warning cards on failed deployments with automatic rollback status.
+- **CI/CD & Headless Friendly**: Automatically detects non-interactive terminals / pipelines to disable ANSI escapes and maintain deterministic log output. You can also explicitly pass `--no-animation` and `--no-color`.
 
 ---
 

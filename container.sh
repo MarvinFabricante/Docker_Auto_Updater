@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Docker Container Auto-Updater
 # A simple, safe tool to update Docker containers with auto-rollback.
-# ==============================================================================
 
 set -Eeuo pipefail
 
@@ -33,21 +31,153 @@ SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 LOG_FILE="${LOG_FILE:-}"
 
-# Minimalist CLI Colors
-C_RESET="\033[0m"
-C_BOLD="\033[1m"
-C_DIM="\033[2m"
-C_GREEN="\033[32m"
-C_RED="\033[31m"
-C_YELLOW="\033[33m"
-C_CYAN="\033[36m"
+NO_ANIMATION="${NO_ANIMATION:-false}"
+NO_COLOR="${NO_COLOR:-}"
 
-# Minimalist Icons
-I_STEP="${C_CYAN}›${C_RESET}"
-I_OK="${C_GREEN}✔${C_RESET}"
-I_ERR="${C_RED}✖${C_RESET}"
-I_WARN="${C_YELLOW}▲${C_RESET}"
-I_BULLET="${C_DIM}•${C_RESET}"
+# Rich Modern Terminal Colors & Styles
+init_colors() {
+    if [ -n "${NO_COLOR:-}" ] || [ "${NO_COLOR:-false}" = "true" ] || [ "${TERM:-}" = "dumb" ]; then
+        C_RESET=""
+        C_BOLD=""
+        C_DIM=""
+        C_GREEN=""
+        C_RED=""
+        C_YELLOW=""
+        C_CYAN=""
+        C_BLUE=""
+        C_MAGENTA=""
+        C_GRAY=""
+    else
+        C_RESET="\033[0m"
+        C_BOLD="\033[1m"
+        C_DIM="\033[2m"
+        C_GREEN="\033[38;5;78m"
+        C_RED="\033[38;5;203m"
+        C_YELLOW="\033[38;5;220m"
+        C_CYAN="\033[38;5;75m"
+        C_BLUE="\033[38;5;39m"
+        C_MAGENTA="\033[38;5;177m"
+        C_GRAY="\033[38;5;244m"
+    fi
+
+    # Icons & Indicators
+    I_STEP="${C_CYAN}›${C_RESET}"
+    I_OK="${C_GREEN}✔${C_RESET}"
+    I_ERR="${C_RED}✖${C_RESET}"
+    I_WARN="${C_YELLOW}▲${C_RESET}"
+    I_BULLET="${C_GRAY}•${C_RESET}"
+}
+init_colors
+
+# Animation & UX Assets
+SPIN_CHARS=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+BAR_FULL="████████████████████"
+BAR_EMPTY="░░░░░░░░░░░░░░░░░░░░"
+
+is_interactive_tty() {
+    [ -t 1 ] && [ "${NO_ANIMATION}" != "true" ] && [ "${TERM:-}" != "dumb" ]
+}
+
+clear_screen() {
+    clear 2>/dev/null || printf "\033[2J\033[H" 2>/dev/null || true
+}
+
+IS_FULLSCREEN="false"
+
+enter_fullscreen() {
+    if is_interactive_tty && [ "$IS_FULLSCREEN" != "true" ]; then
+        IS_FULLSCREEN="true"
+        tput smcup 2>/dev/null || echo -ne "\033[?1049h"
+        clear_screen
+    fi
+}
+
+exit_fullscreen() {
+    if [ "$IS_FULLSCREEN" = "true" ]; then
+        IS_FULLSCREEN="false"
+        tput rmcup 2>/dev/null || echo -ne "\033[?1049l"
+    fi
+    if [ -t 1 ]; then
+        echo -ne "\033[?25h\033[0m" 2>/dev/null || true
+    fi
+}
+
+cleanup_terminal() {
+    exit_fullscreen
+}
+trap cleanup_terminal EXIT INT TERM
+
+pause_and_return() {
+    if [ "${INTERACTIVE_MODE:-false}" = "true" ] && is_interactive_tty; then
+        echo ""
+        echo -e "  ${C_DIM}───────────────────────────────────────────────────────────────────────────${C_RESET}"
+        read -r -p "  Press [Enter] to return to dashboard... " _
+    fi
+}
+
+# Run command with interactive spinner
+run_with_spinner() {
+    local label="$1"
+    shift
+
+    if ! is_interactive_tty; then
+        log_info "${label}..."
+        "$@"
+        local rc=$?
+        return $rc
+    fi
+
+    # Hide cursor
+    echo -ne "\033[?25l"
+
+    local tmp_err
+    tmp_err=$(mktemp)
+
+    "$@" > "$tmp_err" 2>&1 &
+    local cmd_pid=$!
+    local frame_i=0
+    local start_time
+    start_time=$(date +%s)
+
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        local frame="${SPIN_CHARS[$((frame_i % ${#SPIN_CHARS[@]}))]}"
+        local elapsed=$(( $(date +%s) - start_time ))
+        printf "\r  ${C_CYAN}%s${C_RESET} %s ${C_DIM}(%ds)${C_RESET}\033[K" "$frame" "$label" "$elapsed"
+        ((frame_i++)) || true
+        sleep 0.08
+    done
+
+    local exit_code=0
+    set +e
+    wait "$cmd_pid"
+    exit_code=$?
+    set -e
+
+    local total_time=$(( $(date +%s) - start_time ))
+
+    echo -ne "\033[?25h"
+
+    if [ $exit_code -eq 0 ]; then
+        printf "\r  ${I_OK} %s ${C_DIM}(%ds)${C_RESET}\033[K\n" "$label" "$total_time"
+        log_to_file "OK" "$label ($total_time s)"
+    else
+        printf "\r  ${I_ERR} %s ${C_DIM}(%ds)${C_RESET}\033[K\n" "$label" "$total_time"
+        log_to_file "ERROR" "$label failed ($total_time s)"
+        if [ -s "$tmp_err" ]; then
+            sed 's/^/    /' "$tmp_err" >&2
+        fi
+    fi
+
+    rm -f "$tmp_err"
+    return $exit_code
+}
+
+show_banner() {
+    echo -e "  ${C_CYAN}╭────────────────────────────────────────────────────────────╮${C_RESET}"
+    echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}${C_CYAN}🐳  D O C K E R   A U T O - U P D A T E R   v 2 . 0${C_RESET}        ${C_CYAN}│${C_RESET}"
+    echo -e "  ${C_CYAN}│${C_RESET}   ${C_DIM}Zero-Downtime Deployments • Safe Healthchecks • Rollback${C_RESET} ${C_CYAN}│${C_RESET}"
+    echo -e "  ${C_CYAN}╰────────────────────────────────────────────────────────────╯${C_RESET}"
+}
 
 # Output Functions
 log_step()    { echo -e "${I_STEP} ${C_BOLD}$*${C_RESET}"; log_to_file "STEP" "$*"; }
@@ -253,9 +383,14 @@ stop_container_gracefully() {
     local is_running
     is_running=$(docker inspect --format '{{.State.Running}}' "$target" 2>/dev/null || echo "false")
     if [ "$is_running" = "true" ]; then
-        log_info "Stopping old container safely (giving it up to ${timeout}s)..."
-        docker stop -t "$timeout" "$target" >/dev/null
-        log_info "Old container stopped."
+        if is_interactive_tty; then
+            run_with_spinner "Stopping old container safely (giving up to ${timeout}s)" docker stop -t "$timeout" "$target"
+            log_info "Old container stopped."
+        else
+            log_info "Stopping old container safely (giving it up to ${timeout}s)..."
+            docker stop -t "$timeout" "$target" >/dev/null
+            log_info "Old container stopped."
+        fi
     fi
 }
 
@@ -267,13 +402,16 @@ verify_container_health() {
     local health_url="${4:-}"
     local health_cmd="${5:-}"
 
-    log_info "Checking if container is healthy (waiting up to ${timeout}s)..."
+    if ! is_interactive_tty; then
+        log_info "Checking if container is healthy (waiting up to ${timeout}s)..."
+    fi
 
     local elapsed=0
     local start_time
     start_time=$(date +%s)
     local stable_seconds=0
     local min_stable=8
+    local spin_idx=0
 
     while [ "$elapsed" -lt "$timeout" ]; do
         local is_running exit_code
@@ -281,6 +419,7 @@ verify_container_health() {
         exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$target" 2>/dev/null || echo "-1")
 
         if [ "$is_running" != "true" ]; then
+            if is_interactive_tty; then printf "\r\033[K"; fi
             log_error "Container stopped unexpectedly! (Exit code: ${exit_code})"
             return 1
         fi
@@ -289,9 +428,11 @@ verify_container_health() {
         health_status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$target" 2>/dev/null || echo "none")
 
         if [ "$health_status" = "healthy" ]; then
+            if is_interactive_tty; then printf "\r\033[K"; fi
             log_success "Container is healthy and working! (${elapsed}s)"
             return 0
         elif [ "$health_status" = "unhealthy" ]; then
+            if is_interactive_tty; then printf "\r\033[K"; fi
             log_error "Container health check failed!"
             local log_entries
             log_entries=$(docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' "$target" 2>/dev/null || true)
@@ -305,30 +446,60 @@ verify_container_health() {
             if [ -n "$health_url" ]; then
                 debug "Checking health URL: ${health_url}"
                 if curl -s -f -m 3 "$health_url" >/dev/null 2>&1; then
+                    if is_interactive_tty; then printf "\r\033[K"; fi
                     log_success "Health check URL returned OK! (${elapsed}s)"
                     return 0
                 fi
             elif [ -n "$health_cmd" ]; then
                 debug "Running custom health command: ${health_cmd}"
                 if eval "$health_cmd" >/dev/null 2>&1; then
+                    if is_interactive_tty; then printf "\r\033[K"; fi
                     log_success "Custom health command passed!"
                     return 0
                 fi
             else
                 stable_seconds=$((stable_seconds + interval))
                 if [ "$stable_seconds" -ge "$min_stable" ]; then
+                    if is_interactive_tty; then printf "\r\033[K"; fi
                     log_success "Container is running stably with no crashes."
                     return 0
                 fi
             fi
         fi
 
-        sleep "$interval"
+        if is_interactive_tty; then
+            local pct=$(( elapsed * 100 / (timeout > 0 ? timeout : 1) ))
+            [ "$pct" -gt 100 ] && pct=100
+            local bar_len=14
+            local filled=$(( pct * bar_len / 100 ))
+            local empty=$(( bar_len - filled ))
+            local bar_f="${BAR_FULL:0:filled}"
+            local bar_e="${BAR_EMPTY:0:empty}"
+
+            local status_text="starting"
+            [ "$health_status" != "none" ] && status_text="$health_status"
+            [ "$health_status" = "none" ] && [ -n "$health_url" ] && status_text="probing HTTP"
+            [ "$health_status" = "none" ] && [ -n "$health_cmd" ] && status_text="evaluating command"
+            [ "$health_status" = "none" ] && [ -z "$health_url" ] && [ -z "$health_cmd" ] && status_text="testing stability (${stable_seconds}/${min_stable}s)"
+
+            local steps=$(( interval * 10 ))
+            for (( s=0; s<steps; s++ )); do
+                local frame="${SPIN_CHARS[$((spin_idx % ${#SPIN_CHARS[@]}))]}"
+                ((spin_idx++)) || true
+                printf "\r  ${C_CYAN}%s${C_RESET} Checking health: ${C_BOLD}[%02ds/%02ds]${C_RESET} ${C_CYAN}[%s%s]${C_RESET} ${C_DIM}(Status: %s)${C_RESET}\033[K" \
+                    "$frame" "$elapsed" "$timeout" "$bar_f" "$bar_e" "$status_text"
+                sleep 0.1
+            done
+        else
+            sleep "$interval"
+        fi
+
         local now
         now=$(date +%s)
         elapsed=$((now - start_time))
     done
 
+    if is_interactive_tty; then printf "\r\033[K"; fi
     log_error "Health check timed out after ${timeout}s without becoming healthy."
     return 1
 }
@@ -339,6 +510,10 @@ rollback_container() {
     local backup_target="${target}${BACKUP_SUFFIX}"
 
     echo ""
+    echo -e "  ${C_RED}╭── HEALTH VERIFICATION FAILED ───────────────────────────╮${C_RESET}"
+    echo -e "  ${C_RED}│${C_RESET}  The new container failed health checks.                   ${C_RED}│${C_RESET}"
+    echo -e "  ${C_RED}│${C_RESET}  Initiating auto-rollback to guarantee zero downtime...    ${C_RED}│${C_RESET}"
+    echo -e "  ${C_RED}╰─────────────────────────────────────────────────────────╯${C_RESET}"
     log_warn "Health check failed! Rolling back to previous version..."
 
     if docker inspect "$target" >/dev/null 2>&1; then
@@ -379,15 +554,27 @@ clean_dangling_caches() {
         return 0
     fi
 
-    log_info "Cleaning up old unused images and build cache..."
-    local dangling
-    dangling=$(docker images -f "dangling=true" -q)
-    if [ -n "$dangling" ]; then
-        docker rmi $dangling >/dev/null 2>&1 || true
+    if is_interactive_tty; then
+        run_with_spinner "Cleaning up old unused images and build cache" bash -c '
+            dangling=$(docker images -f "dangling=true" -q)
+            if [ -n "$dangling" ]; then
+                docker rmi $dangling >/dev/null 2>&1 || true
+            fi
+            docker image prune -f >/dev/null 2>&1 || true
+            docker builder prune -f >/dev/null 2>&1 || true
+        '
+        log_success "Cache cleanup finished."
+    else
+        log_info "Cleaning up old unused images and build cache..."
+        local dangling
+        dangling=$(docker images -f "dangling=true" -q)
+        if [ -n "$dangling" ]; then
+            docker rmi $dangling >/dev/null 2>&1 || true
+        fi
+        docker image prune -f >/dev/null 2>&1 || true
+        docker builder prune -f >/dev/null 2>&1 || true
+        log_success "Cache cleanup finished."
     fi
-    docker image prune -f >/dev/null 2>&1 || true
-    docker builder prune -f >/dev/null 2>&1 || true
-    log_success "Cache cleanup finished."
 }
 
 # Interactive Container Selection
@@ -401,44 +588,65 @@ prompt_container_selection() {
         exit 1
     fi
 
-    echo -e "\n${C_BOLD}Active Containers:${C_RESET}"
+    echo ""
+    echo -e "  ${C_CYAN}╭── Active Containers ────────────────────────────────────────────────────────────╮${C_RESET}"
+    printf "  ${C_CYAN}│${C_RESET} ${C_BOLD}%-3s  %-24s  %-24s  %-16s${C_RESET}\n" "#" "CONTAINER" "IMAGE" "STATUS"
+    echo -e "  ${C_CYAN}│${C_RESET} ${C_DIM}───────────────────────────────────────────────────────────────────────────────${C_RESET}"
+
     local containers=()
     local i=1
 
-    while IFS=$'\t' read -r name status image; do
-        if [ -n "$name" ]; then
-            containers+=("$name")
-            printf "  %2d. %-26s %-22s %s\n" "$i" "$name" "$image" "${C_DIM}(${status})${C_RESET}"
-            ((i++))
+    while IFS="|" read -r name status image ports; do
+        [ -z "$name" ] && continue
+        containers+=("$name")
+
+        local st_icon
+        if [[ "$status" =~ ^Up ]]; then
+            st_icon="${C_GREEN}●${C_RESET}"
+        elif [[ "$status" =~ ^Exited ]]; then
+            st_icon="${C_RED}○${C_RESET}"
+        else
+            st_icon="${C_YELLOW}◐${C_RESET}"
         fi
-    done < <(docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true)
+
+        local short_status="${status%%,*}"
+        printf "  ${C_CYAN}│${C_RESET} %-3d  %-24.24s  %-24.24s  %b %-16.16s\n" "$i" "$name" "$image" "$st_icon" "$short_status"
+        ((i++))
+    done < <(docker ps -a --format '{{.Names}}|{{.Status}}|{{.Image}}|{{.Ports}}' 2>/dev/null || true)
 
     if [ ${#containers[@]} -eq 0 ]; then
-        echo "  (No containers found)"
+        echo -e "  ${C_CYAN}│${C_RESET}   ${C_DIM}(No containers found on system)${C_RESET}"
     fi
-    echo "   0. Enter name manually"
+
+    echo -e "  ${C_CYAN}│${C_RESET} ${C_DIM}───────────────────────────────────────────────────────────────────────────────${C_RESET}"
+    echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}0${C_RESET}    Enter name manually"
+    echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}c${C_RESET}    Cancel and return"
+    echo -e "  ${C_CYAN}╰────────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
     echo ""
 
     local choice
-    read -r -p "› Select container [number or name]: " choice
+    read -r -p "  › Select container [number, name, or 'c' to cancel]: " choice
 
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#containers[@]}" ]; then
+    if [ "$choice" = "c" ] || [ "$choice" = "C" ] || [ "$choice" = "cancel" ]; then
+        log_warn "Selection cancelled."
+        return 1
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#containers[@]}" ]; then
         CONTAINER_NAME="${containers[$((choice - 1))]}"
-    elif [ "$choice" = "0" ] || [ -z "$choice" ]; then
-        read -r -p "› Container name: " CONTAINER_NAME
+    elif [ "$choice" = "0" ]; then
+        read -r -p "  › Container name: " CONTAINER_NAME
     else
         CONTAINER_NAME="$choice"
     fi
 
     if [ -z "${CONTAINER_NAME}" ]; then
-        log_error "No container selected. Exiting."
-        exit 1
+        log_error "No container selected."
+        return 1
     fi
 }
 
 # Interactive Update Details
 prompt_update_details() {
-    prompt_container_selection
+    prompt_container_selection || return 1
 
     if [ "${INTERACTIVE_MODE:-false}" != "true" ] || [ ! -t 0 ]; then
         return 0
@@ -447,87 +655,165 @@ prompt_update_details() {
     if [ -z "${IMAGE_NAME}" ]; then
         local detected_img
         detected_img=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo "")
-        read -r -p "› Image to deploy [default: ${detected_img:-latest}]: " input_img
+        read -r -p "  › Image to deploy [default: ${detected_img:-latest}]: " input_img
         IMAGE_NAME="${input_img:-$detected_img}"
     fi
 
-    read -r -p "› Stop wait time in seconds [default: ${STOP_TIMEOUT}]: " input_stop
+    read -r -p "  › Stop wait time in seconds [default: ${STOP_TIMEOUT}]: " input_stop
     [ -n "$input_stop" ] && STOP_TIMEOUT="$input_stop"
 
-    read -r -p "› Health check wait time in seconds [default: ${HEALTH_TIMEOUT}]: " input_health
+    read -r -p "  › Health check wait time in seconds [default: ${HEALTH_TIMEOUT}]: " input_health
     [ -n "$input_health" ] && HEALTH_TIMEOUT="$input_health"
 
     echo ""
-    echo -e "${C_DIM}──────────────────────────────────────────${C_RESET}"
-    echo -e "  Container : ${C_BOLD}${CONTAINER_NAME}${C_RESET}"
-    echo -e "  Image     : ${IMAGE_NAME}"
-    echo -e "  Stop Wait : ${STOP_TIMEOUT}s"
-    echo -e "  Check Wait: ${HEALTH_TIMEOUT}s"
-    echo -e "${C_DIM}──────────────────────────────────────────${C_RESET}"
+    echo -e "  ${C_CYAN}╭── 🚀 Container Deployment Plan ─────────────────────────────╮${C_RESET}"
+    printf "  ${C_CYAN}│${C_RESET}  Target Container : ${C_BOLD}%s${C_RESET}\n" "${CONTAINER_NAME}"
+    printf "  ${C_CYAN}│${C_RESET}  Target Image     : ${C_CYAN}%s${C_RESET}\n" "${IMAGE_NAME}"
+    printf "  ${C_CYAN}│${C_RESET}  Graceful Stop    : %ss\n" "${STOP_TIMEOUT}"
+    printf "  ${C_CYAN}│${C_RESET}  Health Timeout   : %ss (interval: %ss)\n" "${HEALTH_TIMEOUT}" "${HEALTH_INTERVAL}"
+    printf "  ${C_CYAN}│${C_RESET}  Rollback Backup  : %s%s\n" "${CONTAINER_NAME}" "${BACKUP_SUFFIX}"
+    printf "  ${C_CYAN}│${C_RESET}  Auto-Prune Cache : %s\n" "${AUTO_PRUNE}"
+    echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
     echo ""
-    read -r -p "› Start update now? [Y/n]: " confirm
+    read -r -p "  › Start update now? [Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn] ]]; then
         log_warn "Update cancelled."
-        exit 0
+        return 1
     fi
 }
 
-# Minimalist Main Menu
+# Render Full-Screen TUI Dashboard
+render_fullscreen_dashboard() {
+    clear_screen
+    local running_cnt total_cnt docker_ver
+    running_cnt=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+    total_cnt=$(docker ps -a -q 2>/dev/null | wc -l | tr -d ' ')
+    docker_ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "detected")
+
+    echo ""
+    echo -e "  ${C_CYAN}╭─────────────────────────────────────────────────────────────────────────────╮${C_RESET}"
+    echo -e "  ${C_CYAN}│${C_RESET} ${C_BOLD}${C_CYAN}🐳  D O C K E R   A U T O - U P D A T E R   v 2 . 0${C_RESET}                           ${C_CYAN}│${C_RESET}"
+    echo -e "  ${C_CYAN}│${C_RESET}   ${C_DIM}Zero-Downtime Safe Deployments • Health Checks • Auto-Rollback${C_RESET}            ${C_CYAN}│${C_RESET}"
+    echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
+    echo -e "    ${C_DIM}Engine:${C_RESET} ${C_BOLD}Docker ${docker_ver}${C_RESET}  ${C_DIM}•${C_RESET}  ${C_GREEN}${running_cnt} active${C_RESET} ${C_DIM}/ ${total_cnt} total containers${C_RESET}  ${C_DIM}•${C_RESET}  ${C_CYAN}Full-Screen TUI Active${C_RESET}"
+    echo ""
+    echo -e "  ${C_CYAN}╭── 📦 Active Containers ─────────────────────────────────────────────────────╮${C_RESET}"
+    printf "  ${C_CYAN}│${C_RESET}  ${C_BOLD}%-24s  %-24s  %-18s${C_RESET}\n" "CONTAINER" "IMAGE" "STATUS"
+    echo -e "  ${C_CYAN}│${C_RESET}  ${C_DIM}───────────────────────────────────────────────────────────────────────────${C_RESET}"
+
+    local q_cnt=0
+    while IFS="|" read -r name status image ports; do
+        [ -z "$name" ] && continue
+        local st_icon
+        if [[ "$status" =~ ^Up ]]; then
+            st_icon="${C_GREEN}●${C_RESET}"
+        elif [[ "$status" =~ ^Exited ]]; then
+            st_icon="${C_RED}○${C_RESET}"
+        else
+            st_icon="${C_YELLOW}◐${C_RESET}"
+        fi
+        local short_status="${status%%,*}"
+        printf "  ${C_CYAN}│${C_RESET}  %-24.24s  %-24.24s  %b %-16.16s\n" "$name" "$image" "$st_icon" "$short_status"
+        ((q_cnt++)) || true
+        [ $q_cnt -ge 5 ] && break
+    done < <(docker ps -a --format '{{.Names}}|{{.Status}}|{{.Image}}|{{.Ports}}' 2>/dev/null || true)
+
+    if [ $q_cnt -eq 0 ]; then
+        echo -e "  ${C_CYAN}│${C_RESET}  ${C_DIM}(No active containers detected)${C_RESET}"
+    elif [ $total_cnt -gt $q_cnt ]; then
+        local rem=$(( total_cnt - q_cnt ))
+        echo -e "  ${C_CYAN}│${C_RESET}  ${C_DIM}... and ${rem} more containers${C_RESET}"
+    fi
+    echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
+    echo ""
+    echo -e "  ${C_BOLD}${C_CYAN}OPERATIONS & CONTROLS${C_RESET}"
+    echo -e "    ${C_GREEN}[1]${C_RESET} 🚀  ${C_BOLD}Update Container${C_RESET}     ${C_DIM}Deploy new image with safety health checks${C_RESET}"
+    echo -e "    ${C_CYAN}[2]${C_RESET} 🔍  ${C_BOLD}Inspect Status${C_RESET}       ${C_DIM}View deep health, IP, ports & rollback status${C_RESET}"
+    echo -e "    ${C_YELLOW}[3]${C_RESET} ⏪  ${C_BOLD}Quick Rollback${C_RESET}       ${C_DIM}Immediately restore last known backup${C_RESET}"
+    echo -e "    ${C_MAGENTA}[4]${C_RESET} 🧹  ${C_BOLD}Prune Cache${C_RESET}          ${C_DIM}Reclaim space from dangling images & build cache${C_RESET}"
+    echo ""
+    echo -e "  ${C_BOLD}${C_CYAN}DAEMONS & AUTOMATION${C_RESET}"
+    echo -e "    ${C_BLUE}[5]${C_RESET} ⏱️   ${C_BOLD}Watch Registry${C_RESET}       ${C_DIM}Continuously monitor registry & auto-deploy${C_RESET}"
+    echo -e "    ${C_BLUE}[6]${C_RESET} 🔗  ${C_BOLD}Webhook Listener${C_RESET}     ${C_DIM}Run HTTP listener for CI/CD deployments${C_RESET}"
+    echo ""
+    echo -e "    ${C_DIM}[0] 🚪  Exit Application (or 'q')${C_RESET}"
+    echo ""
+}
+
+do_watch_interactive() {
+    read -r -p "  › Check interval in seconds [default: ${WATCH_INTERVAL}]: " input_int
+    [ -n "$input_int" ] && WATCH_INTERVAL="$input_int"
+    do_watch
+}
+
+do_webhook_interactive() {
+    read -r -p "  › Webhook port [default: ${WEBHOOK_PORT}]: " input_port
+    [ -n "$input_port" ] && WEBHOOK_PORT="$input_port"
+    read -r -p "  › Secret token (optional) [default: ${WEBHOOK_SECRET}]: " input_sec
+    [ -n "$input_sec" ] && WEBHOOK_SECRET="$input_sec"
+    do_webhook
+}
+
+# Interactive Full-Screen Main Application
 interactive_menu() {
     export INTERACTIVE_MODE="true"
-    echo ""
-    echo -e "${C_BOLD}Docker Auto-Updater${C_RESET}"
-    echo -e "${C_DIM}──────────────────────────────────────────${C_RESET}"
-    echo "  1. Update a container"
-    echo "  2. Check container status"
-    echo "  3. Undo last update (Rollback)"
-    echo "  4. Clean unused Docker cache"
-    echo "  5. Auto-update on new push (Watch mode)"
-    echo "  6. Start webhook listener"
-    echo "  0. Exit"
-    echo -e "${C_DIM}──────────────────────────────────────────${C_RESET}"
+    check_dependencies
+    enter_fullscreen
 
-    local menu_choice
-    read -r -p "› Select an option [0-6]: " menu_choice
+    while true; do
+        render_fullscreen_dashboard
 
-    case "$menu_choice" in
-        1)
-            prompt_update_details
-            do_update
-            ;;
-        2)
-            prompt_container_selection
-            do_status
-            ;;
-        3)
-            prompt_container_selection
-            do_manual_rollback
-            ;;
-        4)
-            do_prune
-            ;;
-        5)
-            prompt_container_selection
-            read -r -p "› Check interval in seconds [default: ${WATCH_INTERVAL}]: " input_int
-            [ -n "$input_int" ] && WATCH_INTERVAL="$input_int"
-            do_watch
-            ;;
-        6)
-            read -r -p "› Webhook port [default: ${WEBHOOK_PORT}]: " input_port
-            [ -n "$input_port" ] && WEBHOOK_PORT="$input_port"
-            read -r -p "› Secret token (optional) [default: ${WEBHOOK_SECRET}]: " input_sec
-            [ -n "$input_sec" ] && WEBHOOK_SECRET="$input_sec"
-            do_webhook
-            ;;
-        0)
-            echo "Bye!"
-            exit 0
-            ;;
-        *)
-            log_error "Invalid option."
-            exit 1
-            ;;
-    esac
+        local menu_choice
+        read -r -p "  › Select option [0-6] or [q] to exit: " menu_choice
+
+        case "$menu_choice" in
+            1)
+                clear_screen
+                CONTAINER_NAME=""
+                IMAGE_NAME=""
+                ( prompt_update_details && do_update ) || true
+                pause_and_return
+                ;;
+            2)
+                clear_screen
+                CONTAINER_NAME=""
+                ( prompt_container_selection && do_status ) || true
+                pause_and_return
+                ;;
+            3)
+                clear_screen
+                CONTAINER_NAME=""
+                ( prompt_container_selection && do_manual_rollback ) || true
+                pause_and_return
+                ;;
+            4)
+                clear_screen
+                echo ""
+                ( do_prune ) || true
+                pause_and_return
+                ;;
+            5)
+                clear_screen
+                CONTAINER_NAME=""
+                ( prompt_container_selection && do_watch_interactive ) || true
+                pause_and_return
+                ;;
+            6)
+                clear_screen
+                ( do_webhook_interactive ) || true
+                pause_and_return
+                ;;
+            0|[Qq]|[Qq][Uu][Ii][Tt])
+                exit_fullscreen
+                echo "Bye!"
+                exit 0
+                ;;
+            *)
+                echo -e "  ${I_ERR} Invalid option. Please select 0-6 or 'q'."
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 # Update Workflow
@@ -566,13 +852,12 @@ do_update() {
     old_image_id=$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}")
 
     # Pull image
-    log_info "Pulling latest image: ${IMAGE_NAME}..."
     if [ "${DRY_RUN}" = "true" ]; then
         log_info "[dry-run] Would pull image: ${IMAGE_NAME}"
     elif [ "${SKIP_PULL:-false}" = "true" ]; then
         log_info "Skipping pull (local mode)."
     else
-        if ! docker pull "${IMAGE_NAME}"; then
+        if ! run_with_spinner "Pulling latest image: ${IMAGE_NAME}" docker pull "${IMAGE_NAME}"; then
             log_error "Could not pull image '${IMAGE_NAME}'. Container was not changed."
             exit 1
         fi
@@ -678,27 +963,52 @@ do_watch() {
     check_dependencies
     prompt_container_selection
 
-    log_step "Watching for updates on: ${CONTAINER_NAME} (every ${WATCH_INTERVAL}s)"
-    echo "  Press Ctrl+C to stop."
+    echo ""
+    echo -e "  ${C_CYAN}╭── ⏱️  Continuous Watch Active ──────────────────────────────╮${C_RESET}"
+    printf "  ${C_CYAN}│${C_RESET}  Target Container : ${C_BOLD}%s${C_RESET}\n" "${CONTAINER_NAME}"
+    printf "  ${C_CYAN}│${C_RESET}  Polling Interval : %ss\n" "${WATCH_INTERVAL}"
+    echo -e "  ${C_CYAN}│${C_RESET}  Task             : Checking Docker registry for image updates"
+    echo -e "  ${C_CYAN}│${C_RESET}  Control          : Press ${C_BOLD}Ctrl+C${C_RESET} to exit watch mode"
+    echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
+    echo ""
 
+    local cycle=1
     while true; do
-        log_info "Checking registry for new image..."
+        local ts
+        ts="$(date '+%H:%M:%S')"
+        log_step "[${ts}] Cycle #${cycle}: Checking registry for new image..."
         ( do_update ) || {
             log_warn "Check returned error or rolled back."
         }
-        sleep "${WATCH_INTERVAL}"
+        ((cycle++))
+
+        if is_interactive_tty; then
+            for (( w=WATCH_INTERVAL; w>0; w-- )); do
+                local frame="${SPIN_CHARS[$(( (WATCH_INTERVAL - w) % ${#SPIN_CHARS[@]} ))]}"
+                printf "\r  ${C_CYAN}%s${C_RESET} Next check in ${C_BOLD}%ds${C_RESET}... ${C_DIM}(Ctrl+C to stop)${C_RESET}\033[K" "$frame" "$w"
+                sleep 1
+            done
+            printf "\r\033[K"
+        else
+            sleep "${WATCH_INTERVAL}"
+        fi
     done
 }
 
 # Lightweight Webhook Listener
 do_webhook() {
     check_dependencies
-    log_step "Starting webhook listener on port ${WEBHOOK_PORT}..."
+    echo ""
+    echo -e "  ${C_CYAN}╭── 🔗 Docker Webhook Server Online ──────────────────────────╮${C_RESET}"
+    printf "  ${C_CYAN}│${C_RESET}  Endpoint : ${C_BOLD}${C_CYAN}http://0.0.0.0:%s/webhook${C_RESET}\n" "${WEBHOOK_PORT}"
     if [ -n "${WEBHOOK_SECRET}" ]; then
-        log_info "Protected by secret token."
+        echo -e "  ${C_CYAN}│${C_RESET}  Security : ${C_GREEN}🔒 Protected by secret token${C_RESET}"
     else
-        log_warn "No secret token set. Anyone can trigger this endpoint."
+        echo -e "  ${C_CYAN}│${C_RESET}  Security : ${C_YELLOW}▲ Open endpoint (no secret configured)${C_RESET}"
     fi
+    echo -e "  ${C_CYAN}│${C_RESET}  Control  : Press ${C_BOLD}Ctrl+C${C_RESET} to terminate listener"
+    echo -e "  ${C_CYAN}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
+    echo ""
 
     python3 -c '
 import http.server, socketserver, subprocess, os, json, sys
@@ -772,23 +1082,51 @@ do_status() {
         exit 1
     fi
 
-    echo ""
-    echo -e "${C_BOLD}Container: ${CONTAINER_NAME}${C_RESET}"
-    echo -e "${C_DIM}──────────────────────────────────────────${C_RESET}"
-    docker inspect --format '
-  Status : {{.State.Status}}
-  Running: {{.State.Running}}
-  Health : {{if .State.Health}}{{.State.Health.Status}}{{else}}None configured{{end}}
-  Image  : {{.Config.Image}}
-  Restart: {{.HostConfig.RestartPolicy.Name}}
-  Ports  : {{range $p, $conf := .NetworkSettings.Ports}}{{$p}} -> {{(index $conf 0).HostPort}} {{end}}
-' "${CONTAINER_NAME}"
-    echo -e "${C_DIM}──────────────────────────────────────────${C_RESET}"
+    local st_running st_status st_health st_image st_ip st_ports st_restart
+    st_running=$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+    st_status=$(docker inspect --format '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+    st_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo "none")
+    st_image=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+    st_ip=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "${CONTAINER_NAME}" 2>/dev/null | xargs || echo "none")
+    st_ports=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{$p}}->{{(index $conf 0).HostPort}} {{end}}' "${CONTAINER_NAME}" 2>/dev/null | xargs || echo "none")
+    st_restart=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "${CONTAINER_NAME}" 2>/dev/null || echo "no")
+    [ -z "$st_restart" ] && st_restart="no"
+    [ -z "$st_ports" ] && st_ports="(none exposed)"
+
+    local status_badge
+    if [ "$st_running" = "true" ]; then
+        status_badge="${C_GREEN}● RUNNING${C_RESET} (${st_status})"
+    else
+        status_badge="${C_RED}○ STOPPED${C_RESET} (${st_status})"
+    fi
+
+    local health_badge
+    if [ "$st_health" = "healthy" ]; then
+        health_badge="${C_GREEN}✔ HEALTHY${C_RESET} (passing checks)"
+    elif [ "$st_health" = "unhealthy" ]; then
+        health_badge="${C_RED}✖ UNHEALTHY${C_RESET} (failing checks)"
+    elif [ "$st_health" = "starting" ]; then
+        health_badge="${C_YELLOW}⏳ STARTING${C_RESET} (awaiting health)"
+    else
+        health_badge="${C_DIM}None configured${C_RESET}"
+    fi
 
     local backup_target="${CONTAINER_NAME}${BACKUP_SUFFIX}"
+    local backup_info="${C_DIM}No backup active${C_RESET}"
     if docker inspect "${backup_target}" >/dev/null 2>&1; then
-        echo -e "  ${C_YELLOW}Backup exists:${C_RESET} ${backup_target} (available for rollback)"
+        backup_info="${C_GREEN}🛡️  Backup container exists (${backup_target})${C_RESET}"
     fi
+
+    echo ""
+    echo -e "  ${C_CYAN}╭── 🔍 Container Status: ${CONTAINER_NAME} ──────────────────────────────────────╮${C_RESET}"
+    printf "  ${C_CYAN}│${C_RESET}  %-14s : %b\n" "State" "$status_badge"
+    printf "  ${C_CYAN}│${C_RESET}  %-14s : %b\n" "Health" "$health_badge"
+    printf "  ${C_CYAN}│${C_RESET}  %-14s : %s\n" "Image" "$st_image"
+    printf "  ${C_CYAN}│${C_RESET}  %-14s : %s\n" "IP Address" "${st_ip:-bridge}"
+    printf "  ${C_CYAN}│${C_RESET}  %-14s : %s\n" "Port Mapping" "$st_ports"
+    printf "  ${C_CYAN}│${C_RESET}  %-14s : %s\n" "Restart Policy" "$st_restart"
+    printf "  ${C_CYAN}│${C_RESET}  %-14s : %b\n" "Rollback State" "$backup_info"
+    echo -e "  ${C_CYAN}╰───────────────────────────────────────────────────────────────────────────────╯${C_RESET}"
     echo ""
 }
 
@@ -800,24 +1138,24 @@ do_prune() {
 
 # Help Menu
 show_help() {
-    echo -e "${C_BOLD}Docker Auto-Updater${C_RESET}
-A simple, safe tool to update Docker containers with auto-rollback.
-
+    echo ""
+    show_banner
+    echo -e "
 ${C_BOLD}Usage:${C_RESET}
   $(basename "$0") [command] [options]
 
-${C_BOLD}Commands:${C_RESET}
-  update       Update a container (pull, safe stop, health check, rollback on fail) [default]
-  rollback     Restore container to previous backup
-  watch        Watch registry and update automatically on new image
-  webhook      Run a lightweight webhook server
-  status       Show container status and health
-  prune        Clean up unused Docker images and cache
-  help         Show this help screen
+${C_BOLD}${C_CYAN}Commands:${C_RESET}
+  ${C_BOLD}update${C_RESET}       Update a container (pull, safe stop, health check, rollback on fail) [default]
+  ${C_BOLD}rollback${C_RESET}     Restore container to previous working backup
+  ${C_BOLD}watch${C_RESET}        Continuously poll registry and update automatically on new image
+  ${C_BOLD}webhook${C_RESET}      Run a lightweight webhook HTTP listener
+  ${C_BOLD}status${C_RESET}       Show container status, health, ports, and backup state
+  ${C_BOLD}prune${C_RESET}        Clean up unused Docker images and build cache
+  ${C_BOLD}help${C_RESET}         Show this help screen
 
-${C_BOLD}Options:${C_RESET}
+${C_BOLD}${C_CYAN}Options:${C_RESET}
   -c, --container <name>     Container name (required for automated runs)
-  -i, --image <name:tag>     Image to use (default: container's current image)
+  -i, --image <name:tag>     Image to deploy (default: container's current image)
   -t, --stop-timeout <secs>  Safe stop wait time in seconds (default: 15)
   --health-timeout <secs>    Health check wait time in seconds (default: 60)
   --health-interval <secs>   Time between health checks in seconds (default: 3)
@@ -826,16 +1164,18 @@ ${C_BOLD}Options:${C_RESET}
   --force                    Force re-deployment even if image did not change
   --interactive              Show interactive prompts
   --no-prune                 Do not clean up unused cache after update
+  --no-animation             Disable live spinners and progress animations
+  --no-color                 Disable ANSI color output
   --dry-run                  Preview steps without changing anything
   -v, --verbose              Show debug logs
   -h, --help                 Show this help screen
 
-${C_BOLD}Examples:${C_RESET}
-  $(basename "$0")                              # Opens interactive menu
-  $(basename "$0") update -c my-web-app         # Direct update
-  $(basename "$0") status -c my-web-app         # Check status
-  $(basename "$0") rollback -c my-web-app       # Roll back
-  $(basename "$0") prune                        # Clean cache
+${C_BOLD}${C_CYAN}Examples:${C_RESET}
+  $(basename "$0")                              # Opens interactive dashboard
+  $(basename "$0") update -c my-web-app         # Direct container update
+  $(basename "$0") status -c my-web-app         # View container health card
+  $(basename "$0") rollback -c my-web-app       # Roll back to last backup
+  $(basename "$0") prune                        # Clean Docker cache
 "
 }
 
@@ -844,6 +1184,11 @@ main() {
     load_config
 
     if [ $# -eq 0 ] && [ -t 0 ]; then
+        interactive_menu
+        exit 0
+    fi
+
+    if [ $# -gt 0 ] && [[ "$1" =~ ^(menu|dashboard|interactive|tui)$ ]]; then
         interactive_menu
         exit 0
     fi
@@ -921,6 +1266,15 @@ main() {
                 DRY_RUN="true"
                 shift
                 ;;
+            --no-animation)
+                NO_ANIMATION="true"
+                shift
+                ;;
+            --no-color)
+                NO_COLOR="true"
+                init_colors
+                shift
+                ;;
             -v|--verbose)
                 VERBOSE="true"
                 shift
@@ -936,6 +1290,11 @@ main() {
                 ;;
         esac
     done
+
+    if [ "${INTERACTIVE_MODE:-false}" = "true" ] && [ -z "${CONTAINER_NAME:-}" ]; then
+        interactive_menu
+        exit 0
+    fi
 
     case "$command" in
         update)
